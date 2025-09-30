@@ -2,6 +2,12 @@
 
 DPAT is a Python-based security tool that analyzes password hashes extracted from Active Directory domain controllers. It generates comprehensive HTML reports showing password usage statistics, policy violations, and security insights from both NTDS dumps and password cracking results.
 
+### Sample Reports
+
+![DPAT Summary](img/dpat%20summary.png)
+
+![Group Statistics](img/group%20statistics.png)
+
 ## Features
 
 - **Comprehensive Password Analysis**: Analyze password length distributions, reuse patterns, and policy violations
@@ -168,11 +174,6 @@ DPAT generates comprehensive reports including:
 - **Group Statistics**: Privileged group analysis (when group files provided)
 - **Kerberoastable Accounts**: Service account analysis (when provided)
 
-### Sample Reports
-
-![DPAT Summary](img/dpat%20summary.png)
-
-![Group Statistics](img/group%20statistics.png)
 
 ## Sample Data
 
