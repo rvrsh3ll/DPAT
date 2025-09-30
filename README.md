@@ -168,6 +168,12 @@ DPAT generates comprehensive reports including:
 - **Group Statistics**: Privileged group analysis (when group files provided)
 - **Kerberoastable Accounts**: Service account analysis (when provided)
 
+### Sample Reports
+
+![DPAT Summary](img/dpat%20summary.png)
+
+![Group Statistics](img/group%20statistics.png)
+
 ## Sample Data
 
 The repository includes sample data in the `sample_data/` directory for testing:
