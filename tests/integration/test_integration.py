@@ -538,7 +538,7 @@ class TestHistoryDataIntegration(DPATTestCase):
     def test_history_data_processing(self):
         """Test processing with history sample data files."""
         # Use the actual history sample data files
-        ntds_file = Path("sample_data/history/customer.ntds")
+        ntds_file = Path("sample_data/history/customer-small.ntds")
         cracked_file = Path("sample_data/history/john-customer-small.pot")
         
         # Verify files exist
