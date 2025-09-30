@@ -524,6 +524,44 @@ class HTMLReportBuilder:
         
         self.add_content("".join(html_parts))
     
+    def add_chart(self, chart_id: str, chart_type: str, data: dict, options: dict = None) -> None:
+        """
+        Add a Chart.js chart to the HTML report.
+        
+        Args:
+            chart_id: Unique ID for the chart canvas
+            chart_type: Type of chart (bar, pie, line, etc.)
+            data: Chart data configuration
+            options: Chart options configuration
+        """
+        if options is None:
+            options = {}
+        
+        # Convert Python booleans to JavaScript booleans
+        import json
+        data_json = json.dumps(data)
+        options_json = json.dumps(options)
+        
+        # Set width based on chart type
+        width = "50%" if chart_type == "pie" else "100%"
+        
+        chart_html = f"""
+<div class='table-wrap' style='text-align: center;'>
+    <div class='chart-container' style='position: relative; width: {width}; margin: 20px auto; display: inline-block;'>
+        <canvas id='{chart_id}'></canvas>
+    </div>
+</div>
+<script>
+    const ctx_{chart_id} = document.getElementById('{chart_id}').getContext('2d');
+    new Chart(ctx_{chart_id}, {{
+        type: '{chart_type}',
+        data: {data_json},
+        options: {options_json}
+    }});
+</script>
+"""
+        self.add_content(chart_html)
+    
     def generate_html(self) -> str:
         """
         Generate complete HTML document.
@@ -535,6 +573,7 @@ class HTMLReportBuilder:
             "<!DOCTYPE html>\n<html>\n<head>\n"
             "<meta charset='utf-8'>\n<meta name='viewport' content='width=device-width,initial-scale=1'>\n"
             "<link rel='stylesheet' href='report.css'>\n"
+            "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>\n"
             "<title>DPAT Report</title>\n"
             "</head>\n<body>\n"
             + self.body_content +
@@ -1530,7 +1569,143 @@ def main():
         
         # Generate main summary report
         summary_builder = HTMLReportBuilder(config.report_directory)
+        
+        # Add the summary table first
         summary_builder.add_table(summary_table, ("Count", "Percent", "Description", "More Info"), cols_to_not_escape=3)
+        
+        # Add charts after the summary table
+        # Password Length Distribution Chart
+        db_manager.cursor.execute('''SELECT LENGTH(password) as plen, COUNT(password) as count 
+                                    FROM hash_infos 
+                                    WHERE password IS NOT NULL AND history_index = -1 AND LENGTH(password) > 0 
+                                    GROUP BY plen ORDER BY plen''')
+        length_data = db_manager.cursor.fetchall()
+        
+        if length_data:
+            length_labels = [str(plen) for plen, _ in length_data]
+            length_counts = [count for _, count in length_data]
+            
+            length_chart_data = {
+                "labels": length_labels,
+                "datasets": [{
+                    "label": "Number of Passwords",
+                    "data": length_counts,
+                    "backgroundColor": "rgba(54, 162, 235, 0.2)",
+                    "borderColor": "rgba(54, 162, 235, 1)",
+                    "borderWidth": 1
+                }]
+            }
+            
+            length_chart_options = {
+                "responsive": True,
+                "plugins": {
+                    "title": {
+                        "display": True,
+                        "text": "Password Length Distribution"
+                    },
+                    "legend": {
+                        "display": False
+                    }
+                },
+                "scales": {
+                    "x": {
+                        "title": {
+                            "display": True,
+                            "text": "Password Length (characters)"
+                        }
+                    },
+                    "y": {
+                        "beginAtZero": True,
+                        "title": {
+                            "display": True,
+                            "text": "Number of Passwords"
+                        }
+                    }
+                }
+            }
+            
+            summary_builder.add_chart("passwordLengthChart", "bar", length_chart_data, length_chart_options)
+        
+        # Password Cracking Success Chart
+        cracked_count = next((row[0] for row in summary_table if "Passwords Discovered Through Cracking" in str(row[2])), 0)
+        uncracked_count = total_hashes - cracked_count
+        
+        if total_hashes > 0:
+            crack_chart_data = {
+                "labels": ["Cracked Passwords", "Uncracked Passwords"],
+                "datasets": [{
+                    "data": [cracked_count, uncracked_count],
+                    "backgroundColor": ["rgba(75, 192, 192, 0.2)", "rgba(255, 99, 132, 0.2)"],
+                    "borderColor": ["rgba(75, 192, 192, 1)", "rgba(255, 99, 132, 1)"],
+                    "borderWidth": 1
+                }]
+            }
+            
+            crack_chart_options = {
+                "responsive": True,
+                "plugins": {
+                    "title": {
+                        "display": True,
+                        "text": "Password Cracking Success Rate"
+                    }
+                }
+            }
+            
+            summary_builder.add_chart("crackingSuccessChart", "pie", crack_chart_data, crack_chart_options)
+        
+        # Top 10 Most Common Passwords Chart
+        db_manager.cursor.execute('''SELECT password, COUNT(password) as count 
+                                    FROM hash_infos 
+                                    WHERE password IS NOT NULL AND history_index = -1 AND password != "" 
+                                    GROUP BY password ORDER BY count DESC LIMIT 10''')
+        top_passwords = db_manager.cursor.fetchall()
+        
+        if top_passwords:
+            # Sanitize passwords for display
+            sanitized_passwords = [sanitizer.sanitize_table_row((pwd,), [0], [], config.sanitize_output)[0] for pwd, _ in top_passwords]
+            password_counts = [count for _, count in top_passwords]
+            
+            top_passwords_chart_data = {
+                "labels": sanitized_passwords,
+                "datasets": [{
+                    "label": "Usage Count",
+                    "data": password_counts,
+                    "backgroundColor": "rgba(255, 159, 64, 0.2)",
+                    "borderColor": "rgba(255, 159, 64, 1)",
+                    "borderWidth": 1
+                }]
+            }
+            
+            top_passwords_chart_options = {
+                "responsive": True,
+                "plugins": {
+                    "title": {
+                        "display": True,
+                        "text": "Top 10 Most Common Passwords"
+                    },
+                    "legend": {
+                        "display": False
+                    }
+                },
+                "scales": {
+                    "x": {
+                        "title": {
+                            "display": True,
+                            "text": "Password"
+                        }
+                    },
+                    "y": {
+                        "beginAtZero": True,
+                        "title": {
+                            "display": True,
+                            "text": "Usage Count"
+                        }
+                    }
+                }
+            }
+            
+            summary_builder.add_chart("topPasswordsChart", "bar", top_passwords_chart_data, top_passwords_chart_options)
+        
         summary_builder.write_report(config.output_file)
         
         # Generate group reports if groups are specified
