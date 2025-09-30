@@ -1398,8 +1398,31 @@ def main():
         length_rows = db_manager.cursor.fetchall()
         
         if length_rows:
+            # Create individual detail pages for each password length
+            counter = 0
+            for plen, count in length_rows:
+                db_manager.cursor.execute('SELECT username_full FROM hash_infos WHERE history_index = -1 AND LENGTH(password) = ?', (plen,))
+                usernames = db_manager.cursor.fetchall()
+                
+                length_detail_builder = HTMLReportBuilder(config.report_directory)
+                length_detail_builder.add_table(usernames, [f"Users with a password length of {plen}"])
+                detail_filename = length_detail_builder.write_report(f"{counter}length_usernames.html")
+                
+                # Add Details link to the row
+                length_rows[counter] = (plen, count, f'<a href="{detail_filename}">Details</a>')
+                counter += 1
+            
             length_builder = HTMLReportBuilder(config.report_directory)
-            length_builder.add_table(length_rows, ["Password Length", "Count"])
+            length_builder.add_table(length_rows, ["Password Length", "Count", "Details"], cols_to_not_escape=2)
+            
+            # Add second table ordered by count DESC
+            db_manager.cursor.execute('''SELECT COUNT(password) as count, LENGTH(password) as plen 
+                                        FROM hash_infos 
+                                        WHERE password IS NOT NULL AND history_index = -1 AND LENGTH(password) > 0 
+                                        GROUP BY plen ORDER BY count DESC''')
+            count_ordered_rows = db_manager.cursor.fetchall()
+            length_builder.add_table(count_ordered_rows, ["Count", "Password Length"])
+            
             length_filename = length_builder.write_report("password_length_stats.html")
             summary_table.append((None, None, "Password Length Stats", f'<a href="{length_filename}">Details</a>'))
         
