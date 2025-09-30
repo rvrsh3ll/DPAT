@@ -135,12 +135,33 @@ def sanitize(pass_or_hash):
         sanitized_string = pass_or_hash
         lenp = len(pass_or_hash)
         if lenp == 32:
+            # For 32-char hashes: show first 4 and last 4 chars
             sanitized_string = pass_or_hash[0:4] + \
-                "*"*(lenp-8) + pass_or_hash[lenp-5:lenp-1]
+                "*"*(lenp-8) + pass_or_hash[lenp-4:lenp]
         elif lenp > 2:
+            # For other strings: show first and last char
             sanitized_string = pass_or_hash[0] + \
                 "*"*(lenp-2) + pass_or_hash[lenp-1]
         return sanitized_string
+
+def sanitize_table_row(row, password_indices, hash_indices):
+    """
+    Sanitize passwords and hashes in table rows.
+    password_indices: list of column indices containing passwords
+    hash_indices: list of column indices containing hashes
+    """
+    if not args.sanitize:
+        return row
+    
+    sanitized_row = list(row)
+    for idx in password_indices:
+        if idx < len(sanitized_row) and sanitized_row[idx] is not None:
+            sanitized_row[idx] = sanitize(str(sanitized_row[idx]))
+    for idx in hash_indices:
+        if idx < len(sanitized_row) and sanitized_row[idx] is not None:
+            sanitized_row[idx] = sanitize(str(sanitized_row[idx]))
+    
+    return tuple(sanitized_row)
 
 
 class HtmlBuilder:
@@ -450,10 +471,13 @@ if not speed_it_up:
 c.execute('SELECT username_full,password,LENGTH(password) as plen,nt_hash,only_lm_cracked FROM hash_infos WHERE history_index = -1 ORDER BY plen DESC, password')
 rows = c.fetchall()
 
+# Sanitize passwords and hashes in the data
+sanitized_rows = [sanitize_table_row(row, [1], [3]) for row in rows]  # password at index 1, nt_hash at index 3
+
 num_hashes = len(rows)
 hbt = HtmlBuilder()
 hbt.add_table_to_html(
-    rows, ["Username", "Password", "Password Length", "NT Hash", "Only LM Cracked"])
+    sanitized_rows, ["Username", "Password", "Password Length", "NT Hash", "Only LM Cracked"])
 filename = hbt.write_html_report("all hashes.html")
 summary_table.append((num_hashes, None, "Password Hashes",
                       "<a href=\"" + filename + "\">Details</a>"))
@@ -512,9 +536,12 @@ if args.kerbfile:
         # ----------------------------------------------------------------
 
         if cracked_rows:
+            # Sanitize passwords and hashes in the data
+            sanitized_kerb_rows = [sanitize_table_row(row, [2], [1]) for row in cracked_rows]  # password at index 2, nt_hash at index 1
+            
             kerb_report_builder = HtmlBuilder()
             kerb_headers = ("Username", "NT Hash", "Password")
-            kerb_report_builder.add_table_to_html(cracked_rows, kerb_headers, 2)
+            kerb_report_builder.add_table_to_html(sanitized_kerb_rows, kerb_headers, 2)
             kerb_filename = kerb_report_builder.write_html_report("kerberoast_cracked.html")
 
             # percentage of roastable accounts that are cracked
@@ -569,9 +596,12 @@ for group in compare_groups:
 
         detailed_member_rows.append((username_full, nt_hash, shared_users_str, share_cnt, pw, lm_present))
 
+    # Sanitize passwords and hashes in the data
+    sanitized_member_rows = [sanitize_table_row(row, [4], [1]) for row in detailed_member_rows]  # password at index 4, nt_hash at index 1
+
     member_headers = ["Username", "NT Hash", "Users Sharing this Hash", "Share Count", "Password", "Non-Blank LM Hash?"]
     hbt_members = HtmlBuilder()
-    hbt_members.add_table_to_html(detailed_member_rows, member_headers)
+    hbt_members.add_table_to_html(sanitized_member_rows, member_headers)
     members_filename = hbt_members.write_html_report(f"{group_name}_members.html")
 
     # 2) Build “cracked passwords for group” table/page
@@ -582,9 +612,12 @@ for group in compare_groups:
     cracked_rows = c.fetchall()
     num_groupmembers_cracked = len(cracked_rows)
 
+    # Sanitize passwords in the data
+    sanitized_cracked_rows = [sanitize_table_row(row, [2], []) for row in cracked_rows]  # password at index 2
+
     cracked_headers = [f'Username of "{group_name}" Member', "Password Length", "Password", "Only LM Cracked"]
     hbt_cracked = HtmlBuilder()
-    hbt_cracked.add_table_to_html(cracked_rows, cracked_headers)
+    hbt_cracked.add_table_to_html(sanitized_cracked_rows, cracked_headers)
     cracked_filename = hbt_cracked.write_html_report(f"{group_name}_cracked_passwords.html")
 
     # 3) Add a single row for THIS GROUP to the groups summary page list
@@ -634,7 +667,9 @@ if violating_rows:
     headers = ["Username", "Password Length", "Policy Min Length", "Password"]
     data = [(u, plen, min_len, ("" if p is None else p))
             for u, plen, p in violating_rows]
-    hbt_policy.add_table_to_html(data, headers, cols_to_not_escape=3)
+    # Sanitize passwords in the data
+    sanitized_data = [sanitize_table_row(row, [3], []) for row in data]  # password at index 3
+    hbt_policy.add_table_to_html(sanitized_data, headers, cols_to_not_escape=3)
 
     policy_filename = hbt_policy.write_html_report("password_policy_violations.html")
 
@@ -666,9 +701,11 @@ try:
     # Build the HTML details table
     if offenders:
         print(f"[+] Found {len(offenders)} users with username == password")
+        # Sanitize passwords and hashes in the data
+        sanitized_offenders = [sanitize_table_row(row, [1], [3]) for row in offenders]  # password at index 1, nt_hash at index 3
         hbt_user_as_pass = HtmlBuilder()
         hbt_user_as_pass.add_table_to_html(
-            offenders,
+            sanitized_offenders,
             ["Username", "Password", "Password Length", "NT Hash"]
         )
 
@@ -743,9 +780,11 @@ try:
 
     if offenders_hashed:
         print(f"[+] Found {len(offenders_hashed)} additional users whose password == username (hash match)")
+        # Sanitize passwords and hashes in the data
+        sanitized_offenders_hashed = [sanitize_table_row(row, [1], [3]) for row in offenders_hashed]  # password at index 1, nt_hash at index 3
         hbt_user_as_pass_hash = HtmlBuilder()
         hbt_user_as_pass_hash.add_table_to_html(
-            offenders_hashed,
+            sanitized_offenders_hashed,
             ["Username", "Derived Password (from username)", "Password Length", "NT Hash"]
         )
         filename2 = hbt_user_as_pass_hash.write_html_report("username_equals_password_by_hash.html")
@@ -781,7 +820,9 @@ if num_lm_hashes_cracked_where_nt_hash_not_cracked != 0:
     hbt = HtmlBuilder()
     headers = ["LM Hash", "Left Portion of Password",
                "Right Portion of Password", "NT Hash"]
-    hbt.add_table_to_html(rows, headers)
+    # Sanitize passwords and hashes in the data
+    sanitized_lm_rows = [sanitize_table_row(row, [1, 2], [0, 3]) for row in rows]  # passwords at indices 1,2; hashes at indices 0,3
+    hbt.add_table_to_html(sanitized_lm_rows, headers)
     filename = hbt.write_html_report("lm_noncracked.html")
     output += ' <a href="' + filename + '">Details</a>'
     output += "</br></br>Cracking these to their 7-character upcased representation is easy with Hashcat and this tool will determine the correct case and concatenate the two halves of the password for you!</br></br> Try this Hashcat command to crack all LM hashes:</br> <strong>./hashcat64.bin -m 3000 -a 3 customer.ntds -1 ?a ?1?1?1?1?1?1?1 --increment</strong></br></br> Or for John, try this:</br> <strong>john --format=LM customer.ntds</strong></br>"
@@ -792,7 +833,9 @@ c.execute('SELECT username_full,password,LENGTH(password) as plen,only_lm_cracke
 rows = c.fetchall()
 hbt = HtmlBuilder()
 headers = ["Username", "Password", "Password Length", "Only LM Cracked"]
-hbt.add_table_to_html(rows, headers)
+# Sanitize passwords in the data
+sanitized_lm_cracked_rows = [sanitize_table_row(row, [1], []) for row in rows]  # password at index 1
+hbt.add_table_to_html(sanitized_lm_cracked_rows, headers)
 filename = hbt.write_html_report("users_only_cracked_through_lm.html")
 percent_only_lm_cracked = pct(len(rows), num_hashes)
 summary_table.append((len(rows), percent_only_lm_cracked, "Passwords Only Cracked via LM Hash",
@@ -833,7 +876,9 @@ c.execute('SELECT password,COUNT(password) as count FROM hash_infos WHERE passwo
 rows = c.fetchall()
 hbt = HtmlBuilder()
 headers = ["Password", "Count"]
-hbt.add_table_to_html(rows, headers)
+# Sanitize passwords in the data
+sanitized_top_passwords = [sanitize_table_row(row, [0], []) for row in rows]  # password at index 0
+hbt.add_table_to_html(sanitized_top_passwords, headers)
 filename = hbt.write_html_report("top_password_stats.html")
 summary_table.append((None, None, "Top Password Use Stats",
                       "<a href=\"" + filename + "\">Details</a>"))
@@ -857,7 +902,9 @@ for idx, (nt_hash, hit_count, pwd) in enumerate(rows):
     counter += 1
 hbt = HtmlBuilder()
 headers = ["NT Hash", "Count", "Password", "Details"]
-hbt.add_table_to_html(rows, headers, 3)
+# Sanitize passwords and hashes in the data
+sanitized_reuse_rows = [sanitize_table_row(row, [2], [0]) for row in rows]  # password at index 2, nt_hash at index 0
+hbt.add_table_to_html(sanitized_reuse_rows, headers, 3)
 filename = hbt.write_html_report("password_reuse_stats.html")
 summary_table.append((None, None, "Password Reuse Stats",
                       "<a href=\"" + filename + "\">Details</a>"))
