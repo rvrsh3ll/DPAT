@@ -965,28 +965,6 @@ class CrackedPasswordProcessor:
         self.db_manager.cursor.execute(sql, (password, nt_hash))
 
 
-def strtobool(value: str) -> bool:
-    """
-    Convert a string representation of truth to True or False.
-    
-    Args:
-        value: String value to convert
-        
-    Returns:
-        Boolean value
-        
-    Raises:
-        ValueError: If value cannot be converted
-    """
-    value = value.lower()
-    if value in ('y', 'yes', 't', 'true', 'on', '1'):
-        return True
-    elif value in ('n', 'no', 'f', 'false', 'off', '0'):
-        return False
-    else:
-        raise ValueError(f"invalid truth value {value!r}")
-
-
 def calculate_percentage(part: int, whole: int) -> float:
     """
     Calculate percentage with safe division.
