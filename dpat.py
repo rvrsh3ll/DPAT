@@ -1171,6 +1171,11 @@ def main():
         unique_percent = calculate_percentage(unique_hashes, total_hashes)
         summary_table.append((unique_hashes, unique_percent, "Unique Password Hashes", None))
         
+        # Calculate total number of duplicate password hashes
+        duplicate_hashes = total_hashes - unique_hashes
+        duplicate_percent = calculate_percentage(duplicate_hashes, total_hashes)
+        summary_table.append((duplicate_hashes, duplicate_percent, "Duplicate Password Hashes Identified Through Audit", None))
+        
         # Cracked passwords
         db_manager.cursor.execute('SELECT count(*) FROM hash_infos WHERE password IS NOT NULL AND history_index = -1')
         cracked_count = db_manager.cursor.fetchone()[0]
