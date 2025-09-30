@@ -542,9 +542,12 @@ class HTMLReportBuilder:
         data_json = json.dumps(data)
         options_json = json.dumps(options)
         
+        # Set width based on chart type
+        width = "50%" if chart_type == "pie" else "100%"
+        
         chart_html = f"""
 <div class='table-wrap' style='text-align: center;'>
-    <div class='chart-container' style='position: relative; width: 100%; margin: 20px auto; display: inline-block;'>
+    <div class='chart-container' style='position: relative; width: {width}; margin: 20px auto; display: inline-block;'>
         <canvas id='{chart_id}'></canvas>
     </div>
 </div>
