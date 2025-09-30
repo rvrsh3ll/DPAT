@@ -387,7 +387,7 @@ if not speed_it_up:
             history_index = results.group(2)
         # Exclude machine accounts (where account name ends in $) by default
         # Exclude krbtgt account by default to protect this infrequently changing password from unnecesary disclosure, issue #10
-        if args.machineaccts or not username.endswith("$") and args.krbtgt or not username == "krbtgt":
+        if (args.machineaccts or not username.endswith("$")) and (args.krbtgt or not username == "krbtgt"):
             c.execute("INSERT INTO hash_infos (username_full, username, lm_hash , lm_hash_left , lm_hash_right , nt_hash, history_index, history_base_username) VALUES (?,?,?,?,?,?,?,?)",
                     (usernameFull, username, lm_hash, lm_hash_left, lm_hash_right, nt_hash, history_index, history_base_username))
     fin.close()
