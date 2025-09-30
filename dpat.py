@@ -1096,6 +1096,9 @@ def prompt_user_to_open_report(config: Config) -> None:
 def main():
     """Main application entry point."""
     try:
+        # Initialize groups summary entry variable
+        groups_summary_entry = None
+        
         # Parse configuration
         config = parse_arguments()
         
@@ -1131,6 +1134,10 @@ def main():
         # Process cracked passwords
         cracked_processor.process_cracked_file()
         cracked_processor.perform_lm_cracking()
+        
+        # Create groups summary entry if groups were processed
+        if config.groups_directory and group_manager.groups:
+            groups_summary_entry = (len(group_manager.groups), None, "Group Cracking Statistics", "groups_stats.html")
         
         # Generate comprehensive reports
         logger.info("Generating comprehensive reports...")
@@ -1190,6 +1197,13 @@ def main():
         unique_passwords_percent = calculate_percentage(unique_passwords_cracked, total_hashes)
         summary_table.append((unique_passwords_cracked, unique_passwords_percent, 
                             "Unique Passwords Discovered Through Cracking", None))
+        
+        # Insert groups summary entry if groups were processed
+        if groups_summary_entry is not None:
+            # Create proper HTML link for groups summary entry
+            groups_link = f'<a href="{groups_summary_entry[3]}">Details</a>'
+            groups_entry_with_link = (groups_summary_entry[0], groups_summary_entry[1], groups_summary_entry[2], groups_link)
+            summary_table.append(groups_entry_with_link)
         
         # Password Policy Violations
         db_manager.cursor.execute(f'SELECT count(*) FROM hash_infos WHERE LENGTH(password) < ? AND password IS NOT NULL AND history_index = -1', (config.min_password_length,))
@@ -1457,13 +1471,7 @@ def main():
             groups_builder.add_table(group_summary_rows, group_page_headers, cols_to_not_escape=(4, 5))
             groups_filename = groups_builder.write_report("groups_stats.html")
             
-            # Add groups link to main summary
-            summary_table.append((len(group_manager.groups), None, "Groups Analyzed", f'<a href="{groups_filename}">Details</a>'))
-            
-            # Regenerate main summary with groups link
-            summary_builder = HTMLReportBuilder(config.report_directory)
-            summary_builder.add_table(summary_table, ("Count", "Percent", "Description", "More Info"), cols_to_not_escape=3)
-            summary_builder.write_report(config.output_file)
+            # Groups summary entry is already properly created and inserted above
         
         # Close database
         db_manager.close()
