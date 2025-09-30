@@ -1214,6 +1214,51 @@ def main():
         summary_table.append((unique_passwords_cracked, unique_passwords_percent, 
                             "Unique Passwords Discovered Through Cracking", None))
         
+        # Kerberoastable Accounts
+        if config.kerberoast_file:
+            logger.info(f"Processing Kerberoastable file: {config.kerberoast_file}")
+            kerb_rows = NTDSProcessor.load_kerberoast_ntds(config.kerberoast_file, config.kerberoast_encoding, config.debug_mode)
+            
+            if kerb_rows:
+                # Extract unique usernames from kerberoast entries
+                kerb_usernames = tuple({u for u, _ in kerb_rows})  # de-dupe set → tuple
+                total_kerb_accts = len(kerb_usernames)
+                placeholders = ",".join("?" * total_kerb_accts)
+                
+                db_manager.cursor.execute(f'''
+                    SELECT username_full, nt_hash, password
+                    FROM   hash_infos
+                    WHERE  username_full IN ({placeholders})
+                      AND  password IS NOT NULL
+                      AND  history_index = -1
+                ''', kerb_usernames)
+                cracked_kerb_rows = db_manager.cursor.fetchall()
+                
+                if cracked_kerb_rows:
+                    # Sanitize passwords and hashes in the data
+                    sanitized_kerb_rows = [sanitizer.sanitize_table_row(row, [2], [1], config.sanitize_output) 
+                                         for row in cracked_kerb_rows]  # password at index 2, nt_hash at index 1
+                    
+                    kerb_builder = HTMLReportBuilder(config.report_directory)
+                    kerb_builder.add_table(sanitized_kerb_rows, 
+                                         ["Username", "NT Hash", "Password"], cols_to_not_escape=2)
+                    kerb_filename = kerb_builder.write_report("kerberoast_cracked.html")
+                    
+                    # Calculate percentage of roastable accounts that are cracked
+                    kerb_percent = calculate_percentage(len(cracked_kerb_rows), total_hashes)
+                    
+                    summary_table.append((
+                        len(cracked_kerb_rows), kerb_percent,
+                        "Cracked Kerberoastable Accounts",
+                        f'<a href="{kerb_filename}">Details</a>'
+                    ))
+                    logger.info(f"Kerberoast cracked report written: {kerb_filename} "
+                              f"({len(cracked_kerb_rows)} / {total_hashes} = {kerb_percent}% cracked)")
+                else:
+                    logger.info("No Kerberoastable accounts were cracked.")
+            else:
+                logger.warning("Kerberoastable file contained no valid NTDS lines.")
+        
         # Insert groups summary entry if groups were processed
         if groups_summary_entry is not None:
             # Create proper HTML link for groups summary entry
