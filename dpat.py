@@ -1177,6 +1177,15 @@ def main():
         cracked_percent = calculate_percentage(cracked_count, total_hashes)
         summary_table.append((cracked_count, cracked_percent, "Passwords Discovered Through Cracking", None))
         
+        # Number of UNIQUE passwords that were cracked
+        db_manager.cursor.execute('''SELECT count(DISTINCT password) 
+                                    FROM hash_infos 
+                                    WHERE password IS NOT NULL AND history_index = -1''')
+        unique_passwords_cracked = db_manager.cursor.fetchone()[0]
+        unique_passwords_percent = calculate_percentage(unique_passwords_cracked, total_hashes)
+        summary_table.append((unique_passwords_cracked, unique_passwords_percent, 
+                            "Unique Passwords Discovered Through Cracking", None))
+        
         # Password Policy Violations
         db_manager.cursor.execute(f'SELECT count(*) FROM hash_infos WHERE LENGTH(password) < ? AND password IS NOT NULL AND history_index = -1', (config.min_password_length,))
         policy_violations = db_manager.cursor.fetchone()[0]
