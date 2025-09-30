@@ -388,11 +388,15 @@ if not speed_it_up:
         groups_users[group[0]] = users
 
     # Read in NTDS file
+    print(f"[+] Reading NTDS file: {ntds_file}")
     fin = open(ntds_file)
+    accounts_read = 0
+    accounts_filtered = 0
     for line in fin:
         vals = line.rstrip("\n").split(':')
         if len(vals) == 1:
             continue
+        accounts_read += 1
         usernameFull = vals[0]
         lm_hash = vals[2]
         lm_hash_left = lm_hash[0:16]
@@ -411,7 +415,17 @@ if not speed_it_up:
         if (args.machineaccts or not username.endswith("$")) and (args.krbtgt or not username == "krbtgt"):
             c.execute("INSERT INTO hash_infos (username_full, username, lm_hash , lm_hash_left , lm_hash_right , nt_hash, history_index, history_base_username) VALUES (?,?,?,?,?,?,?,?)",
                     (usernameFull, username, lm_hash, lm_hash_left, lm_hash_right, nt_hash, history_index, history_base_username))
+        else:
+            accounts_filtered += 1
     fin.close()
+    
+    # Count total accounts processed
+    c.execute('SELECT count(*) FROM hash_infos WHERE history_index = -1')
+    total_accounts_processed = c.fetchone()[0]
+    print(f"[+] Read {accounts_read} accounts from NTDS file")
+    if accounts_filtered > 0:
+        print(f"[+] Filtered out {accounts_filtered} accounts (machine accounts, krbtgt)")
+    print(f"[+] Processing {total_accounts_processed} accounts for analysis")
 
     # update group membership flags
     for group in groups_users:
@@ -481,6 +495,15 @@ hbt.add_table_to_html(
 filename = hbt.write_html_report("all hashes.html")
 summary_table.append((num_hashes, None, "Password Hashes",
                       "<a href=\"" + filename + "\">Details</a>"))
+
+# Check if we have any hashes to process
+if num_hashes == 0:
+    print("[!] Warning: No password hashes found in NTDS file. This may be due to:")
+    print("    - All accounts being filtered out (machine accounts, krbtgt)")
+    print("    - Empty or invalid NTDS file")
+    print("    - Incorrect file format")
+    print("[*] Exiting gracefully...")
+    exit(0)
 
 # Total number of UNIQUE hashes in the NTDS file
 c.execute('SELECT count(DISTINCT nt_hash) FROM hash_infos WHERE history_index = -1')
