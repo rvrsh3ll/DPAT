@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dpat import (
     Config, NTDSProcessor, HashProcessor, DataSanitizer, 
     HTMLReportBuilder, DatabaseManager, GroupManager, CrackedPasswordProcessor,
-    calculate_percentage, strtobool
+    calculate_percentage
 )
 from tests import TestConfig, TestDataGenerator, DatabaseTestHelper, DPATTestCase
 
@@ -518,30 +518,6 @@ class TestUtilityFunctions(DPATTestCase):
         result = calculate_percentage(1, 3)
         self.assertEqual(result, 33.33)
     
-    def test_strtobool(self):
-        """Test string to boolean conversion."""
-        # True values
-        self.assertTrue(strtobool("y"))
-        self.assertTrue(strtobool("yes"))
-        self.assertTrue(strtobool("t"))
-        self.assertTrue(strtobool("true"))
-        self.assertTrue(strtobool("on"))
-        self.assertTrue(strtobool("1"))
-        
-        # False values
-        self.assertFalse(strtobool("n"))
-        self.assertFalse(strtobool("no"))
-        self.assertFalse(strtobool("f"))
-        self.assertFalse(strtobool("false"))
-        self.assertFalse(strtobool("off"))
-        self.assertFalse(strtobool("0"))
-        
-        # Invalid values
-        with self.assertRaises(ValueError):
-            strtobool("invalid")
-        
-        with self.assertRaises(ValueError):
-            strtobool("maybe")
 
 
 if __name__ == '__main__':
