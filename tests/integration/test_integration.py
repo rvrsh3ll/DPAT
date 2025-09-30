@@ -532,5 +532,108 @@ class TestErrorHandlingIntegration(DPATTestCase):
         self.assertEqual(len(group_manager.groups), 0)
 
 
+class TestHistoryDataIntegration(DPATTestCase):
+    """Integration tests using history sample data files."""
+    
+    def test_history_data_processing(self):
+        """Test processing with history sample data files."""
+        # Use the actual history sample data files
+        ntds_file = Path("sample_data/history/customer.ntds")
+        cracked_file = Path("sample_data/history/john-customer-small.pot")
+        
+        # Verify files exist
+        self.assertTrue(ntds_file.exists(), f"NTDS file not found: {ntds_file}")
+        self.assertTrue(cracked_file.exists(), f"Cracked file not found: {cracked_file}")
+        
+        config = Config(
+            ntds_file=str(ntds_file),
+            cracked_file=str(cracked_file),
+            min_password_length=8,
+            report_directory=str(self.temp_dir)
+        )
+        
+        # Process data
+        db_manager = DatabaseManager(config)
+        ntds_processor = NTDSProcessor(config, db_manager)
+        cracked_processor = CrackedPasswordProcessor(config, db_manager)
+        
+        db_manager.create_schema([])
+        
+        # Process NTDS file
+        ntds_processor.process_ntds_file()
+        
+        # Process cracked passwords
+        cracked_processor.process_cracked_file()
+        
+        # Verify data was processed
+        cursor = db_manager.cursor
+        cursor.execute("SELECT COUNT(*) FROM hash_infos WHERE history_index = -1")
+        total_accounts = cursor.fetchone()[0]
+        self.assertGreater(total_accounts, 0, "No accounts were processed from NTDS file")
+        
+        cursor.execute("SELECT COUNT(*) FROM hash_infos WHERE password IS NOT NULL AND history_index = -1")
+        cracked_accounts = cursor.fetchone()[0]
+        # Note: The cracked file may not contain hashes that match the NTDS file
+        # This is expected behavior for this test dataset
+        
+        # Check for password history entries
+        cursor.execute("SELECT COUNT(*) FROM hash_infos WHERE history_index >= 0")
+        history_entries = cursor.fetchone()[0]
+        self.assertGreater(history_entries, 0, "No password history entries found")
+        
+        # Generate reports
+        sanitizer = DataSanitizer()
+        
+        # Generate all hashes report
+        cursor.execute('''SELECT username_full, password, LENGTH(password) as plen, nt_hash, 
+                         CASE WHEN lm_hash != "aad3b435b51404eeaad3b435b51404ee" THEN "Yes" ELSE "No" END as lm_cracked
+                         FROM hash_infos WHERE history_index = -1 ORDER BY username_full''')
+        rows = cursor.fetchall()
+        
+        sanitized_rows = [sanitizer.sanitize_table_row(row, [1], [3], config.sanitize_output) 
+                         for row in rows]
+        
+        report_builder = HTMLReportBuilder(config.report_directory)
+        report_builder.add_table(sanitized_rows, 
+                               ["Username", "Password", "Password Length", "NT Hash", "Only LM Cracked"])
+        report_filename = report_builder.write_report("history_test_all_hashes.html")
+        
+        # Verify report was created
+        report_path = Path(config.report_directory) / report_filename
+        self.assert_file_exists(report_path)
+        self.assert_file_contains(report_path, "Username")
+        
+        # Generate password history report
+        cursor.execute('''SELECT username_full, password, LENGTH(password) as plen, nt_hash, history_index
+                         FROM hash_infos WHERE history_index >= 0 ORDER BY username_full, history_index''')
+        history_rows = cursor.fetchall()
+        
+        if history_rows:
+            sanitized_history_rows = [sanitizer.sanitize_table_row(row, [1], [3], config.sanitize_output) 
+                                    for row in history_rows]
+            
+            history_builder = HTMLReportBuilder(config.report_directory)
+            history_builder.add_table(sanitized_history_rows, 
+                                    ["Username", "Password", "Password Length", "NT Hash", "History Index"])
+            history_filename = history_builder.write_report("history_test_password_history.html")
+            
+            # Verify history report was created
+            history_report_path = Path(config.report_directory) / history_filename
+            self.assert_file_exists(history_report_path)
+            self.assert_file_contains(history_report_path, "History Index")
+        
+        db_manager.close()
+        
+        # Log test results
+        print(f"\nHistory Data Test Results:")
+        print(f"  Total accounts processed: {total_accounts}")
+        print(f"  Cracked accounts: {cracked_accounts}")
+        print(f"  Password history entries: {history_entries}")
+        if total_accounts > 0:
+            print(f"  Crack rate: {(cracked_accounts/total_accounts)*100:.1f}%")
+        else:
+            print(f"  Crack rate: N/A (no accounts processed)")
+
+
 if __name__ == '__main__':
     unittest.main()
