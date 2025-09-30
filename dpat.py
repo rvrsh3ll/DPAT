@@ -1630,8 +1630,18 @@ def main():
                     }
                 },
                 "scales": {
+                    "x": {
+                        "title": {
+                            "display": True,
+                            "text": "Password Length (characters)"
+                        }
+                    },
                     "y": {
-                        "beginAtZero": True
+                        "beginAtZero": True,
+                        "title": {
+                            "display": True,
+                            "text": "Number of Passwords"
+                        }
                     }
                 }
             }
@@ -1700,8 +1710,18 @@ def main():
                     }
                 },
                 "scales": {
+                    "x": {
+                        "title": {
+                            "display": True,
+                            "text": "Password"
+                        }
+                    },
                     "y": {
-                        "beginAtZero": True
+                        "beginAtZero": True,
+                        "title": {
+                            "display": True,
+                            "text": "Usage Count"
+                        }
                     }
                 }
             }
