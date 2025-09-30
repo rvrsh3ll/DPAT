@@ -1247,6 +1247,72 @@ def main():
             up_percent = 0
             summary_table.append((0, up_percent, "Accounts Using Username As Password", None))
         
+        # Username equals password (by hash comparison) - for non-cracked passwords
+        hash_processor = HashProcessor()
+        already_flagged = set()
+        
+        # Track users already found by the cracked password check to avoid duplicates
+        if username_password_rows:
+            already_flagged.update(row[0].split('\\')[-1] for row in username_password_rows)  # Extract username from username_full
+        
+        # Get all accounts with NT hashes for hash comparison
+        db_manager.cursor.execute('''SELECT username_full, username, nt_hash, password 
+                                    FROM hash_infos 
+                                    WHERE history_index = -1 
+                                    AND nt_hash IS NOT NULL 
+                                    AND username IS NOT NULL''')
+        hash_comparison_rows = db_manager.cursor.fetchall()
+        
+        offenders_hashed = []
+        
+        for username_full, username, nt_hash, cracked_password in hash_comparison_rows:
+            # Skip if already flagged by cracked password check
+            if username in already_flagged:
+                continue
+            
+            # Quick check: if we have a cracked password, check equality one more time (case-insensitive)
+            if cracked_password:
+                if cracked_password.lower() == username.lower():
+                    offenders_hashed.append((username_full, cracked_password, len(cracked_password), nt_hash))
+                    continue
+            
+            # Generate username-based password candidates and compare by NT hash
+            candidates = hash_processor.generate_username_candidates(username, username_full)
+            
+            try:
+                target_hash = nt_hash.lower()
+            except Exception:
+                target_hash = nt_hash
+            
+            matched = False
+            for candidate in candidates:
+                try:
+                    candidate_hash = hash_processor.ntlm_hash(candidate)
+                    if candidate_hash.lower() == target_hash:
+                        offenders_hashed.append((username_full, candidate, len(candidate), nt_hash))
+                        matched = True
+                        break
+                except RuntimeError as e:
+                    logger.debug(f"NT hash backend unavailable: {e}")
+                    break
+            
+            if matched:
+                already_flagged.add(username)  # Prevent duplicates
+        
+        if offenders_hashed:
+            sanitized_hash_rows = [sanitizer.sanitize_table_row(row, [1], [3], config.sanitize_output) 
+                                 for row in offenders_hashed]
+            
+            hash_builder = HTMLReportBuilder(config.report_directory)
+            hash_builder.add_table(sanitized_hash_rows, 
+                                 ["Username", "Derived Password (from username)", "Password Length", "NT Hash"])
+            hash_filename = hash_builder.write_report("username_equals_password_by_hash.html")
+            hash_percent = calculate_percentage(len(offenders_hashed), total_hashes)
+            summary_table.append((len(offenders_hashed), hash_percent, "Accounts Using Username As Password Not Cracked (by hash)", f'<a href="{hash_filename}">Details</a>'))
+        else:
+            # Always show the row, even if there are no accounts
+            summary_table.append((0, 0, "Accounts Using Username As Password Not Cracked (by hash)", None))
+        
         # LM Hash Statistics
         db_manager.cursor.execute('SELECT count(*) FROM hash_infos WHERE lm_hash != "aad3b435b51404eeaad3b435b51404ee" AND history_index = -1')
         lm_hashes = db_manager.cursor.fetchone()[0]
