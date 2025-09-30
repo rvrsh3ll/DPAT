@@ -544,7 +544,7 @@ class HTMLReportBuilder:
         
         chart_html = f"""
 <div class='table-wrap' style='text-align: center;'>
-    <div class='chart-container' style='position: relative; height: 400px; width: 100%; margin: 20px auto; display: inline-block;'>
+    <div class='chart-container' style='position: relative; width: 100%; margin: 20px auto; display: inline-block;'>
         <canvas id='{chart_id}'></canvas>
     </div>
 </div>
