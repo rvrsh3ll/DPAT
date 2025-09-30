@@ -1187,21 +1187,6 @@ def main():
         summary_table = []
         summary_table.append((len(rows), None, "Password Hashes", '<a href="all_hashes.html">Details</a>'))
         
-        # Add LM hash analysis if we found any
-        if lm_cracked_count > 0:
-            # Generate the LM noncracked report
-            sanitized_lm_rows = [sanitizer.sanitize_table_row(row, [1, 2], [0, 3], config.sanitize_output) 
-                               for row in lm_cracked_nt_not_rows]
-            
-            lm_builder = HTMLReportBuilder(config.report_directory)
-            lm_builder.add_table(sanitized_lm_rows, 
-                               ["LM Hash", "Left Portion of Password", "Right Portion of Password", "NT Hash"])
-            lm_filename = lm_builder.write_report("lm_noncracked.html")
-            lm_cracked_percent = calculate_percentage(lm_cracked_count, total_hashes)
-            summary_table.append((lm_cracked_count, lm_cracked_percent, "Unique LM Hashes Cracked Where NT Hash Was Not Cracked", f'<a href="{lm_filename}">Details</a>'))
-        else:
-            # Always show the row, even if there are no accounts
-            summary_table.append((0, 0, "Unique LM Hashes Cracked Where NT Hash Was Not Cracked", None))
         
         # Unique hashes
         db_manager.cursor.execute('SELECT count(DISTINCT nt_hash) FROM hash_infos WHERE history_index = -1')
@@ -1372,6 +1357,22 @@ def main():
             lm_only_filename = lm_only_builder.write_report("users_only_cracked_through_lm.html")
             lm_only_percent = calculate_percentage(len(lm_only_rows), total_hashes)
             summary_table.append((len(lm_only_rows), lm_only_percent, "Passwords Only Cracked via LM Hash", f'<a href="{lm_only_filename}">Details</a>'))
+        
+        # Add LM hash analysis if we found any
+        if lm_cracked_count > 0:
+            # Generate the LM noncracked report
+            sanitized_lm_rows = [sanitizer.sanitize_table_row(row, [1, 2], [0, 3], config.sanitize_output) 
+                               for row in lm_cracked_nt_not_rows]
+            
+            lm_builder = HTMLReportBuilder(config.report_directory)
+            lm_builder.add_table(sanitized_lm_rows, 
+                               ["LM Hash", "Left Portion of Password", "Right Portion of Password", "NT Hash"])
+            lm_filename = lm_builder.write_report("lm_noncracked.html")
+            lm_cracked_percent = calculate_percentage(lm_cracked_count, total_hashes)
+            summary_table.append((lm_cracked_count, lm_cracked_percent, "Unique LM Hashes Cracked Where NT Hash Was Not Cracked", f'<a href="{lm_filename}">Details</a>'))
+        else:
+            # Always show the row, even if there are no accounts
+            summary_table.append((0, 0, "Unique LM Hashes Cracked Where NT Hash Was Not Cracked", None))
         
         # Top Password Statistics
         db_manager.cursor.execute('''SELECT password, COUNT(password) as count 
