@@ -52,6 +52,7 @@ class Config:
     write_database: bool = False
     debug_mode: bool = False
     speed_mode: bool = False
+    no_prompt: bool = False
 
     def __post_init__(self):
         """Post-initialization processing."""
@@ -1047,6 +1048,8 @@ Examples:
                        help='Write SQLite database to disk for inspection')
     parser.add_argument('-dbg', '--debug', action='store_true',
                        help='Enable debug output')
+    parser.add_argument('--no-prompt', action='store_true',
+                       help='Skip browser prompt (useful for testing/automation)')
     
     args = parser.parse_args()
     
@@ -1063,32 +1066,33 @@ Examples:
         kerberoast_file=args.kerbfile,
         kerberoast_encoding=args.ch_encoding,
         write_database=args.writedb,
-        debug_mode=args.debug
+        debug_mode=args.debug,
+        no_prompt=args.no_prompt
     )
 
 
 def prompt_user_to_open_report(config: Config) -> None:
     """Prompt user to open the report in browser."""
     try:
-        # Skip browser prompt for now to avoid hanging
-        logger.info(f"Report available at: {os.path.join(config.report_directory, config.output_file)}")
-        return
+        if config.no_prompt:
+            # Skip browser prompt when --no-prompt is specified
+            logger.info(f"Report available at: {os.path.join(config.report_directory, config.output_file)}")
+            return
         
-        # Original interactive code (commented out to prevent hanging)
-        # print('Would you like to open the report now? [Y/n]')
-        # while True:
-        #     try:
-        #         response = input().lower().rstrip('\r')
-        #         if not response or strtobool(response):
-        #             report_path = os.path.join("file://" + os.getcwd(), 
-        #                                      config.report_directory, 
-        #                                      config.output_file)
-        #             webbrowser.open(report_path)
-        #             break
-        #         else:
-        #             break
-        #     except ValueError:
-        #         print("Please respond with y or n")
+        # Default behavior: prompt user to open the report
+        print('Would you like to open the report now? [Y/n]')
+        while True:
+            response = input().lower().strip()
+            if response in ('', 'y', 'yes'):
+                report_path = os.path.join("file://" + os.getcwd(), 
+                                         config.report_directory, 
+                                         config.output_file)
+                webbrowser.open(report_path)
+                break
+            elif response in ('n', 'no'):
+                break
+            else:
+                print("Please respond with y or n")
     except KeyboardInterrupt:
         logger.info("Report opening cancelled")
 
