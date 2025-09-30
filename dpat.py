@@ -537,6 +537,11 @@ class HTMLReportBuilder:
         if options is None:
             options = {}
         
+        # Convert Python booleans to JavaScript booleans
+        import json
+        data_json = json.dumps(data)
+        options_json = json.dumps(options)
+        
         chart_html = f"""
 <div class='chart-container' style='position: relative; height: 400px; width: 100%; margin: 20px 0;'>
     <canvas id='{chart_id}'></canvas>
@@ -545,8 +550,8 @@ class HTMLReportBuilder:
     const ctx_{chart_id} = document.getElementById('{chart_id}').getContext('2d');
     new Chart(ctx_{chart_id}, {{
         type: '{chart_type}',
-        data: {data},
-        options: {options}
+        data: {data_json},
+        options: {options_json}
     }});
 </script>
 """
