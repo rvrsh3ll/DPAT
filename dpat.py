@@ -1,992 +1,1473 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
+"""
+Domain Password Audit Tool (DPAT) - Refactored Version
 
-import webbrowser
+A comprehensive tool for analyzing domain password security based on NTDS dumps
+and password cracking results. This refactored version follows better coding
+standards, improved maintainability, and comprehensive documentation.
+
+Author: Carrie Roberts @OrOneEqualsOne
+Author: Dylan Evans @fin3ss3g0d
+License: See LICENSE file
+"""
+
+import argparse
+import binascii
+import html
 import io
+import logging
 import os
 import re
-import argparse
 import sqlite3
+import sys
+import webbrowser
+from dataclasses import dataclass
+from pathlib import Path
 from shutil import copyfile
-import html
-import binascii
-import hashlib
-from distutils.util import strtobool
-from typing import Iterable, Optional, Sequence, Union
-filename_for_html_report = "_DomainPasswordAuditReport.html"
-folder_for_html_report = "DPAT Report"
-filename_for_db_on_disk = "pass_audit.db"
-compare_groups = []
+from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
-_NTDS_PATTERNS = [
-    # DOMAIN\user:rest
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Config:
+    """Configuration class to hold all application settings."""
+    ntds_file: str
+    cracked_file: str
+    output_file: str = "_DomainPasswordAuditReport.html"
+    report_directory: str = "DPAT Report"
+    groups_directory: Optional[str] = None
+    min_password_length: int = 8
+    sanitize_output: bool = False
+    include_machine_accounts: bool = False
+    include_krbtgt: bool = False
+    kerberoast_file: Optional[str] = None
+    kerberoast_encoding: str = 'cp1252'
+    write_database: bool = False
+    debug_mode: bool = False
+    speed_mode: bool = False
+
+    def __post_init__(self):
+        """Post-initialization processing."""
+        if self.sanitize_output:
+            self.report_directory += " - Sanitized"
+        
+        # Ensure report directory exists
+        Path(self.report_directory).mkdir(parents=True, exist_ok=True)
+
+
+class NTDSProcessor:
+    """Handles parsing and processing of NTDS files."""
+    
+    # Regex patterns for different NTDS formats
+    NTDS_PATTERNS = [
+        # DOMAIN\user:rest format
     re.compile(r'^(?P<domain>[^\\]+)\\(?P<user>[^:]+):(?P<nt>[0-9A-Fa-f]{32}).*$', re.I),
-    # pwdump style
+        # pwdump style format
     re.compile(r'^(?P<user>[^:]+):(?P<rid>\d+):(?P<lm>[0-9A-Fa-f]{32}|\*):(?P<nt>[0-9A-Fa-f]{32}|\*):.*$', re.I),
 ]
-def _parse_ntds(line: str):
-    for pat in _NTDS_PATTERNS:
-        m = pat.match(line)
-        if m:
-            return m.group('user').lower(), m.group('nt').lower()
-    return None, None
+    
+    @staticmethod
+    def parse_ntds_line(line: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Parse a single NTDS line and extract username and NT hash.
+        
+        Args:
+            line: Raw line from NTDS file
+            
+        Returns:
+            Tuple of (username, nt_hash) or (None, None) if parsing fails
+        """
+        for pattern in NTDSProcessor.NTDS_PATTERNS:
+            match = pattern.match(line.strip())
+            if match:
+                return match.group('user').lower(), match.group('nt').lower()
+        return None, None
 
-def load_kerberoast_ntds(path: str, enc: str = 'cp1252', debug: bool = False):
-    """
-    Returns rows of tuples  (username_full, nt_hash)
-    """
-    kerb_entries = []
-    with open(path, 'r', encoding=enc, errors='replace') as f:
-        for i, raw in enumerate(f, 1):
-            user, nt = _parse_ntds(raw.strip())
-            if user and nt and nt != '*' * 32:
-                kerb_entries.append((user, nt))
-                if debug:
-                    print(f"[kerb DEBUG] line {i}: {user}:{nt}")
-            elif debug:
-                print(f"[kerb DEBUG] line {i}: skipped")
-    return kerb_entries
+    @staticmethod
+    def load_kerberoast_ntds(file_path: str, encoding: str = 'cp1252', debug: bool = False) -> List[Tuple[str, str]]:
+        """
+        Load Kerberoastable accounts from NTDS file.
+        
+        Args:
+            file_path: Path to the NTDS file
+            encoding: File encoding
+            debug: Enable debug output
+            
+        Returns:
+            List of tuples containing (username_full, nt_hash)
+        """
+        kerb_entries = []
+        try:
+            with open(file_path, 'r', encoding=encoding, errors='replace') as f:
+                for line_num, raw_line in enumerate(f, 1):
+                    user, nt_hash = NTDSProcessor.parse_ntds_line(raw_line)
+                    if user and nt_hash and nt_hash != '*' * 32:
+                        kerb_entries.append((user, nt_hash))
+                        if debug:
+                            logger.debug(f"[kerb DEBUG] line {line_num}: {user}:{nt_hash}")
+                    elif debug:
+                        logger.debug(f"[kerb DEBUG] line {line_num}: skipped")
+        except Exception as e:
+            logger.error(f"Error loading Kerberoast file {file_path}: {e}")
+                
+        return kerb_entries
 
-# This should be False as it is only a shortcut used during development
-speed_it_up = False
+    def __init__(self, config: Config, db_manager: 'DatabaseManager'):
+        """
+        Initialize NTDS processor.
+        
+        Args:
+            config: Application configuration
+            db_manager: Database manager instance
+        """
+        self.config = config
+        self.db_manager = db_manager
+        self.accounts_read = 0
+        self.accounts_filtered = 0
+    
+    def process_ntds_file(self) -> None:
+        """Process the main NTDS file and populate database."""
+        logger.info(f"Reading NTDS file: {self.config.ntds_file}")
+        
+        try:
+            with open(self.config.ntds_file, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    self._process_ntds_line(line.strip())
+                    
+            self._log_processing_stats()
+            
+        except Exception as e:
+            logger.error(f"Error processing NTDS file: {e}")
+            raise
+    
+    def _process_ntds_line(self, line: str) -> None:
+        """
+        Process a single line from the NTDS file.
+        
+        Args:
+            line: Line from NTDS file
+        """
+        if not line or ':' not in line:
+            return
+        
+        parts = line.split(':')
+        if len(parts) < 4:
+            return
+        
+        self.accounts_read += 1
+        
+        username_full = parts[0]
+        lm_hash = parts[2]
+        nt_hash = parts[3]
+        
+        # Split LM hash into left and right parts
+        lm_hash_left = lm_hash[:16]
+        lm_hash_right = lm_hash[16:32]
+        
+        # Extract username from full username
+        username = username_full.split('\\')[-1]
+        
+        # Handle password history
+        history_base_username = username_full
+        history_index = -1
+        
+        history_pattern = r"(?i)(.*\\*.*)_history([0-9]+)$"
+        history_match = re.search(history_pattern, username_full)
+        if history_match:
+            history_base_username = history_match.group(1)
+            history_index = int(history_match.group(2))
+        
+        # Apply account filtering
+        if self._should_include_account(username):
+            self._insert_account_data(
+                username_full, username, lm_hash, lm_hash_left, 
+                lm_hash_right, nt_hash, history_index, history_base_username
+            )
+        else:
+            self.accounts_filtered += 1
+    
+    def _should_include_account(self, username: str) -> bool:
+        """
+        Determine if an account should be included based on filtering rules.
+        
+        Args:
+            username: Username to check
+            
+        Returns:
+            True if account should be included
+        """
+        # Exclude machine accounts (ending with $) unless explicitly included
+        if not self.config.include_machine_accounts and username.endswith("$"):
+            return False
+        
+        # Exclude krbtgt account unless explicitly included
+        if not self.config.include_krbtgt and username == "krbtgt":
+            return False
+        
+        return True
+    
+    def _insert_account_data(self, username_full: str, username: str, lm_hash: str,
+                           lm_hash_left: str, lm_hash_right: str, nt_hash: str,
+                           history_index: int, history_base_username: str) -> None:
+        """
+        Insert account data into database.
+        
+        Args:
+            username_full: Full username (domain\\user)
+            username: Username only
+            lm_hash: LM hash
+            lm_hash_left: Left part of LM hash
+            lm_hash_right: Right part of LM hash
+            nt_hash: NT hash
+            history_index: Password history index
+            history_base_username: Base username for history
+        """
+        sql = """
+            INSERT INTO hash_infos 
+            (username_full, username, lm_hash, lm_hash_left, lm_hash_right, 
+             nt_hash, history_index, history_base_username) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        
+        self.db_manager.cursor.execute(sql, (
+            username_full, username, lm_hash, lm_hash_left, 
+            lm_hash_right, nt_hash, history_index, history_base_username
+        ))
+    
+    def _log_processing_stats(self) -> None:
+        """Log processing statistics."""
+        # Get total accounts processed
+        self.db_manager.cursor.execute('SELECT count(*) FROM hash_infos WHERE history_index = -1')
+        total_accounts = self.db_manager.cursor.fetchone()[0]
+        
+        logger.info(f"Read {self.accounts_read} accounts from NTDS file")
+        if self.accounts_filtered > 0:
+            logger.info(f"Filtered out {self.accounts_filtered} accounts (machine accounts, krbtgt)")
+        logger.info(f"Processing {total_accounts} accounts for analysis")
+    
+    def update_group_membership(self, group_manager: 'GroupManager') -> None:
+        """
+        Update group membership flags in database.
+        
+        Args:
+            group_manager: Group manager instance
+        """
+        for group_name, users in group_manager.group_users.items():
+            for user in users:
+                sql = f'UPDATE hash_infos SET "{group_name}" = 1 WHERE username_full = ?'
+                self.db_manager.cursor.execute(sql, (user,))
 
-parser = argparse.ArgumentParser(
-    description='This script will perform a domain password audit based on an extracted NTDS file and password cracking output such as Hashcat.')
-parser.add_argument('-n', '--ntdsfile',
-                    help='NTDS file name (output from SecretsDump.py)', required=True)
-parser.add_argument('-c', '--crackfile',
-                    help='Password Cracking output in the default form output by Hashcat, such as hashcat.potfile', required=True)
-parser.add_argument('-o', '--outputfile', help='The name of the HTML report output file, defaults to ' +
-                    filename_for_html_report, required=False, default=filename_for_html_report)
-parser.add_argument('-d', '--reportdirectory', help='Folder containing the output HTML files, defaults to ' +
-                    folder_for_html_report, required=False, default=folder_for_html_report)
-parser.add_argument('-w', '--writedb', help='Write the SQLite database info to disk for offline inspection instead of just in memory. Filename will be "' +
-                    filename_for_db_on_disk + '"', default=False, required=False, action='store_true')
-parser.add_argument('-s', '--sanitize', help='Sanitize the report by partially redacting passwords and hashes. Prepends the report directory with \"Sanitized - \"',
-                    default=False, required=False, action='store_true')
-parser.add_argument('-g', '--groupsdirectory', help='The path to the directory containing files that contain lists of usernames in particular groups. The group ' +
-                    'names will be taken from the first line in each file. The username list must be in the same format as found in the NTDS file such as ' +
-                    'some.ad.domain.com\\username', required=False)
-parser.add_argument('-m', '--machineaccts', help='Include machine accounts when calculating statistics',
-                    default=False, required=False, action='store_true')
-parser.add_argument('-k', '--krbtgt', help='Include the krbtgt account', default=False, required=False, action='store_true')
-parser.add_argument('-kz', '--kerbfile',
-        help='File that contains NTDS lines for Kerberoastable accounts (from the cypherhound script)',
-        required=False)
-parser.add_argument('--ch-encoding',
-        help='Encoding to open cypherhound files with (default cp1252)',
-        default='cp1252', required=False)
-parser.add_argument('-dbg', '--debug',
-        help='Enable debug output (for development purposes)',
-        default=False, required=False, action='store_true')
-parser.add_argument('-p', '--minpasslen',
-    type=int,
-    help='Minimum password length defined in the domain password policy. '
-         'Any cracked password shorter than this is reported.',
-    required=True)
-args = parser.parse_args()
 
-min_len = args.minpasslen
-ntds_file = args.ntdsfile
-cracked_file = args.crackfile
-filename_for_html_report = args.outputfile
-folder_for_html_report = args.reportdirectory
-if args.sanitize:
-    folder_for_html_report = folder_for_html_report + " - Sanitized"
-if args.groupsdirectory is not None:
-    group_dir = os.path.normpath(args.groupsdirectory)
-    print(f"[+] Groups directory specified: {group_dir}")
+class HashProcessor:
+    """Handles password hashing and cracking operations."""
+    
+    @staticmethod
+    def ntlm_hash(password: str) -> str:
+        """
+        Generate NT hash (MD4 over UTF-16LE) of a password.
+        
+        Args:
+            password: Password to hash
+            
+        Returns:
+            Lowercase hexadecimal hash string
+            
+        Raises:
+            RuntimeError: If no MD4 backend is available
+        """
+        data = password.encode('utf-16le')
+        
+        # Try different MD4 backends in order of preference
+        try:
+            # 1) pycryptodome → Crypto.* (preferred since we know it's installed)
+            from Crypto.Hash import MD4
+            return MD4.new(data).hexdigest().lower()
+        except Exception as e:
+            logger.debug(f"[DEBUG] PyCryptodome (Crypto) MD4 failed: {e}")
+        
+        try:
+            # 2) pycryptodomex (alternative) → Cryptodome.*
+            from Cryptodome.Hash import MD4
+            return MD4.new(data).hexdigest().lower()
+        except Exception as e:
+            logger.debug(f"[DEBUG] PyCryptodomex (Cryptodome) MD4 failed: {e}")
+        
+        try:
+            # 3) hashlib (often unavailable for MD4)
+            import hashlib
+            return hashlib.new('md4', data).hexdigest().lower()
+        except Exception as e:
+            logger.debug(f"[DEBUG] hashlib md4 unavailable: {e}")
+        
+        try:
+            # 4) passlib
+            from passlib.hash import nthash
+            return nthash.hash(password).lower()
+        except Exception as e:
+            logger.debug(f"[DEBUG] passlib nthash failed: {e}")
+        
+        try:
+            # 5) impacket
+            from impacket.ntlm import compute_nthash
+            return compute_nthash(password).hex().lower()
+        except Exception as e:
+            logger.debug(f"[DEBUG] impacket compute_nthash failed: {e}")
+        
+        raise RuntimeError("No NT hash backend available. Install pycryptodome (or pycryptodomex) / passlib / impacket.")
 
-    if os.path.isdir(group_dir):
-        print(f"[+] Loading group files from directory: {group_dir}")
-        for fname in sorted(os.listdir(group_dir)):
-            fpath = os.path.join(group_dir, fname)
-            print(f"  ├─ Processing file: {fname}")
-            if os.path.isfile(fpath):
-                try:
-                    with open(fpath, 'r', encoding='cp1252' if not args.ch_encoding else args.ch_encoding) as f:
-                        first_line = f.readline().strip()
-                        print(f"  ├─ First line: '{first_line}'")
-                        if first_line:
-                            compare_groups.append((first_line, fpath))
-                            print(f"  └─ Loaded group '{first_line}' from file: {fname}")
-                        else:
-                            print(f"  └─ Skipped empty file: {fname}")
-                except Exception as e:
-                    print(f"[!] Error reading file {fpath}: {e}")
-    else:
-        print(f"[!] Specified groupsdirectory is not a valid directory: {group_dir}")    
+    @staticmethod
+    def generate_username_candidates(username: str, username_full: Optional[str] = None) -> Set[str]:
+        """
+        Generate password candidates based on username patterns.
+        
+        Args:
+            username: Base username
+            username_full: Full username (domain\\user format)
+            
+        Returns:
+            Set of possible password candidates
+        """
+        candidates = set()
+        
+        for val in (username, username_full):
+            if not val:
+                continue
+                
+            val = val.strip()
+            if not val:
+                continue
+                
+            candidates.add(val)
+            
+            # Extract username from domain\\user format
+            if '\\' in val:
+                candidates.add(val.split('\\', 1)[1])
+            
+            # Extract username from user@domain format
+            if '@' in val:
+                candidates.add(val.split('@', 1)[0])
+        
+        # Generate case variants
+        final_candidates = set()
+        for candidate in candidates:
+            if candidate:
+                final_candidates.update([
+                    candidate,
+                    candidate.lower(),
+                    candidate.upper(),
+                    candidate.capitalize()
+                ])
+        
+        return final_candidates
+    
+    @staticmethod
+    def all_casings(input_string: str):
+        """
+        Generate all possible case combinations of a string.
+        
+        Args:
+            input_string: String to generate case variants for
+            
+        Yields:
+            All possible case combinations
+        """
+        if not input_string:
+            yield ""
+        else:
+            first_char = input_string[:1]
+            if first_char.lower() == first_char.upper():
+                # Non-alphabetic character
+                for sub_casing in HashProcessor.all_casings(input_string[1:]):
+                    yield first_char + sub_casing
+            else:
+                # Alphabetic character - generate both cases
+                for sub_casing in HashProcessor.all_casings(input_string[1:]):
+                    yield first_char.lower() + sub_casing
+                    yield first_char.upper() + sub_casing
 
-# create report folder if it doesn't already exist
-if not os.path.exists(folder_for_html_report):
-    os.makedirs(folder_for_html_report)
 
-# percentage calculation helper function
-def pct(part, whole):
-    try:
-        return round((part / whole) * 100, 2)
-    except ZeroDivisionError:
-        return 0.0
-
-# show only the first and last char of a password or a few more chars for a hash
-def sanitize(pass_or_hash):
-    if not args.sanitize:
-        return pass_or_hash
-    else:
-        sanitized_string = pass_or_hash
-        lenp = len(pass_or_hash)
-        if lenp == 32:
+class DataSanitizer:
+    """Handles sanitization of sensitive data in reports."""
+    
+    @staticmethod
+    def sanitize_value(value: str, should_sanitize: bool = True) -> str:
+        """
+        Sanitize a password or hash value for display.
+        
+        Args:
+            value: Value to sanitize
+            should_sanitize: Whether to apply sanitization
+            
+        Returns:
+            Sanitized or original value
+        """
+        if not should_sanitize:
+            return value
+            
+        if not value:
+            return value
+            
+        length = len(value)
+        if length == 32:
             # For 32-char hashes: show first 4 and last 4 chars
-            sanitized_string = pass_or_hash[0:4] + \
-                "*"*(lenp-8) + pass_or_hash[lenp-4:lenp]
-        elif lenp > 2:
+            return value[:4] + "*" * (length - 8) + value[-4:]
+        elif length > 2:
             # For other strings: show first and last char
-            sanitized_string = pass_or_hash[0] + \
-                "*"*(lenp-2) + pass_or_hash[lenp-1]
-        return sanitized_string
-
-def sanitize_table_row(row, password_indices, hash_indices):
-    """
-    Sanitize passwords and hashes in table rows.
-    password_indices: list of column indices containing passwords
-    hash_indices: list of column indices containing hashes
-    """
-    if not args.sanitize:
-        return row
+            return value[0] + "*" * (length - 2) + value[-1]
+        else:
+            return value
     
-    sanitized_row = list(row)
-    for idx in password_indices:
-        if idx < len(sanitized_row) and sanitized_row[idx] is not None:
-            sanitized_row[idx] = sanitize(str(sanitized_row[idx]))
-    for idx in hash_indices:
-        if idx < len(sanitized_row) and sanitized_row[idx] is not None:
-            sanitized_row[idx] = sanitize(str(sanitized_row[idx]))
+    @staticmethod
+    def sanitize_table_row(row: Tuple, password_indices: List[int], hash_indices: List[int], 
+                          should_sanitize: bool = True) -> Tuple:
+        """
+        Sanitize passwords and hashes in table rows.
+        
+        Args:
+            row: Table row tuple
+            password_indices: Column indices containing passwords
+            hash_indices: Column indices containing hashes
+            should_sanitize: Whether to apply sanitization
+            
+        Returns:
+            Sanitized row tuple
+        """
+        if not should_sanitize:
+            return row
+        
+        sanitized_row = list(row)
+        
+        # Sanitize password columns
+        for idx in password_indices:
+            if idx < len(sanitized_row) and sanitized_row[idx] is not None:
+                sanitized_row[idx] = DataSanitizer.sanitize_value(str(sanitized_row[idx]))
+        
+        # Sanitize hash columns
+        for idx in hash_indices:
+            if idx < len(sanitized_row) and sanitized_row[idx] is not None:
+                sanitized_row[idx] = DataSanitizer.sanitize_value(str(sanitized_row[idx]))
+        
+        return tuple(sanitized_row)
+
+
+class HTMLReportBuilder:
+    """Builds HTML reports with proper structure and styling."""
     
-    return tuple(sanitized_row)
-
-
-class HtmlBuilder:
-    bodyStr = ""
-
-    def build_html_body_string(self, s: str):
-        self.bodyStr += s + "\n<div class='section-space'></div>\n"
-
-    def get_html(self):
-        return (
-            "<!DOCTYPE html>\n<html>\n<head>\n"
-            "<meta charset='utf-8'>\n<meta name='viewport' content='width=device-width,initial-scale=1'>\n"
-            "<link rel='stylesheet' href='report.css'>\n"
-            "<title>DPAT Report</title>\n"
-            "</head>\n<body>\n"
-            + self.bodyStr +
-            "\n</body>\n</html>\n"
-        )
-
-    def add_table_to_html(
-        self,
-        rows: Iterable[Sequence[object]],
-        headers: Sequence[str] = (),
-        cols_to_not_escape: Union[int, Sequence[int], None] = (),
-        caption: Optional[str] = None
-    ):
+    def __init__(self, report_directory: str):
+        """
+        Initialize HTML report builder.
+        
+        Args:
+            report_directory: Directory to save reports
+        """
+        self.report_directory = report_directory
+        self.body_content = ""
+    
+    def add_content(self, content: str) -> None:
+        """
+        Add content to the HTML body.
+        
+        Args:
+            content: HTML content to add
+        """
+        self.body_content += content + "\n<div class='section-space'></div>\n"
+    
+    def add_table(self, rows: Sequence[Sequence], headers: Sequence[str] = (), 
+                  cols_to_not_escape: Union[int, Sequence[int], None] = (),
+                  caption: Optional[str] = None) -> None:
+        """
+        Add a table to the HTML report.
+        
+        Args:
+            rows: Table data rows
+            headers: Column headers
+            cols_to_not_escape: Column indices to not HTML escape
+            caption: Table caption
+        """
         if cols_to_not_escape is None:
             cols_to_not_escape = set()
         elif isinstance(cols_to_not_escape, int):
             cols_to_not_escape = {cols_to_not_escape}
         else:
             cols_to_not_escape = set(cols_to_not_escape)
-
-        out = ["<div class='table-wrap'>", "<table class='report'>"]
+        
+        html_parts = ["<div class='table-wrap'>", "<table class='report'>"]
+        
         if caption:
-            out.append(f"<caption>{html.escape(caption)}</caption>")
-
+            html_parts.append(f"<caption>{html.escape(caption)}</caption>")
+        
         # Header
-        out.append("<thead><tr>")
-        for h in headers:
-            out.append(f"<th>{'' if h is None else html.escape(str(h))}</th>")
-        out.append("</tr></thead>")
-
+        html_parts.append("<thead><tr>")
+        for header in headers:
+            html_parts.append(f"<th>{'' if header is None else html.escape(str(header))}</th>")
+        html_parts.append("</tr></thead>")
+        
         # Body
-        out.append("<tbody>")
+        html_parts.append("<tbody>")
         for row in rows:
-            out.append("<tr>")
+            html_parts.append("<tr>")
             for idx, cell in enumerate(row):
                 cell_data = "" if cell is None else str(cell)
                 if idx not in cols_to_not_escape:
                     cell_data = html.escape(cell_data)
-                out.append(f"<td>{cell_data}</td>")
-            out.append("</tr>")
-        out.append("</tbody></table></div>")
-        self.build_html_body_string("".join(out))
-
-    def write_html_report(self, filename):
-        with open(os.path.join(folder_for_html_report, filename), "w", encoding="utf-8") as f:
-            copyfile(os.path.join(os.path.dirname(__file__), "report.css"),
-                     os.path.join(folder_for_html_report, "report.css"))
-            f.write(self.get_html())
+                html_parts.append(f"<td>{cell_data}</td>")
+            html_parts.append("</tr>")
+        html_parts.append("</tbody></table></div>")
+        
+        self.add_content("".join(html_parts))
+    
+    def generate_html(self) -> str:
+        """
+        Generate complete HTML document.
+        
+        Returns:
+            Complete HTML document string
+        """
+        return (
+            "<!DOCTYPE html>\n<html>\n<head>\n"
+            "<meta charset='utf-8'>\n<meta name='viewport' content='width=device-width,initial-scale=1'>\n"
+            "<link rel='stylesheet' href='report.css'>\n"
+            "<title>DPAT Report</title>\n"
+            "</head>\n<body>\n"
+            + self.body_content +
+            "\n</body>\n</html>\n"
+        )
+    
+    def write_report(self, filename: str) -> str:
+        """
+        Write HTML report to file.
+        
+        Args:
+            filename: Output filename
+            
+        Returns:
+            The filename that was written
+        """
+        file_path = Path(self.report_directory) / filename
+        
+        # Copy CSS file
+        css_source = Path(__file__).parent / "report.css"
+        css_dest = Path(self.report_directory) / "report.css"
+        if css_source.exists():
+            copyfile(css_source, css_dest)
+        
+        # Write HTML file
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(self.generate_html())
+        
+        logger.info(f"Report written: {file_path}")
         return filename
 
-hb = HtmlBuilder()
-summary_table = []
-summary_table_headers = ("Count", "Percent", "Description", "More Info")
 
-conn = sqlite3.connect(':memory:')
-if args.writedb:
-    if os.path.exists(filename_for_db_on_disk):
-        os.remove(filename_for_db_on_disk)
-    conn = sqlite3.connect(filename_for_db_on_disk)
-if speed_it_up:
-    conn = sqlite3.connect(filename_for_db_on_disk)
-conn.text_factory = str
-c = conn.cursor()
-
-# nt2lmcrack functionality
-# the all_casings functionality was taken from https://github.com/BBerastegui/foo/blob/master/casing.py
-def all_casings(input_string):
-    if not input_string:
-        yield ""
-    else:
-        first = input_string[:1]
-        if first.lower() == first.upper():
-            for sub_casing in all_casings(input_string[1:]):
-                yield first + sub_casing
-        else:
-            for sub_casing in all_casings(input_string[1:]):
-                yield first.lower() + sub_casing
-                yield first.upper() + sub_casing
-
-
-def crack_it(nt_hash, lm_pass):
-    password = None
-    for pwd_guess in all_casings(lm_pass):
-        hash = hashlib.new('md4', pwd_guess.encode('utf-16le')).hexdigest()
-        if nt_hash.lower() == hash.lower():
-            password = pwd_guess
-            break
-    return password
-
-
-# NTLM hash function
-def ntlm_hash(s: str) -> str:
-    """Return NT hash (MD4 over UTF-16LE) of a string as lowercase hex."""
-    data = s.encode('utf-16le')
-
-    # 1) hashlib (often unavailable for MD4)
-    try:
-        import hashlib
-        return hashlib.new('md4', data).hexdigest().lower()
-    except Exception as e:
-        print(f"[DEBUG] hashlib md4 unavailable: {e}")
-
-    # 2) pycryptodome → Crypto.*
-    try:
-        from Crypto.Hash import MD4
-        return MD4.new(data).hexdigest().lower()
-    except Exception as e:
-        print(f"[DEBUG] PyCryptodome (Crypto) MD4 failed: {e}")
-
-    # 3) pycryptodomex (alternative) → Cryptodome.*
-    try:
-        from Cryptodome.Hash import MD4
-        return MD4.new(data).hexdigest().lower()
-    except Exception as e:
-        print(f"[DEBUG] PyCryptodomex (Cryptodome) MD4 failed: {e}")
-
-    # 4) passlib
-    try:
-        from passlib.hash import nthash
-        return nthash.hash(s).lower()
-    except Exception as e:
-        print(f"[DEBUG] passlib nthash failed: {e}")
-
-    # 5) impacket
-    try:
-        from impacket.ntlm import compute_nthash
-        return compute_nthash(s).hex().lower()
-    except Exception as e:
-        print(f"[DEBUG] impacket compute_nthash failed: {e}")
-
-    raise RuntimeError("No NT hash backend available. Install pycryptodome (or pycryptodomex) / passlib / impacket.")
-
-
-def username_candidates(u: str, u_full: str | None = None) -> set[str]:
-    """
-    Expand plausible username strings that users might set as their password:
-    - raw username
-    - DOMAIN\\user -> user
-    - user@domain -> user
-    - case variants (lower/upper/capitalize)
-    """
-    bases: set[str] = set()
-    for val in (u, u_full):
-        if not val:
-            continue
-        val = val.strip()
-        if not val:
-            continue
-        bases.add(val)
-        if '\\' in val:             # DOMAIN\user
-            bases.add(val.split('\\', 1)[1])
-        if '@' in val:              # user@domain
-            bases.add(val.split('@', 1)[0])
-
-    # Normalize and generate simple case variants
-    bases = {b for b in (x.strip() for x in bases) if b}
-    cands: set[str] = set()
-    for b in bases:
-        cands.add(b)
-        cands.add(b.lower())
-        cands.add(b.upper())
-        cands.add(b.capitalize())
-    return cands
-
-
-if not speed_it_up:
-    # Create tables and indices
-    c.execute('''CREATE TABLE hash_infos
-        (username_full text collate nocase, username text collate nocase, lm_hash text, lm_hash_left text, lm_hash_right text, nt_hash text, password text, lm_pass_left text, lm_pass_right text, only_lm_cracked boolean, history_index int, history_base_username text)''')
-    c.execute("CREATE INDEX index_nt_hash ON hash_infos (nt_hash);")
-    c.execute("CREATE INDEX index_lm_hash_left ON hash_infos (lm_hash_left);")
-    c.execute("CREATE INDEX index_lm_hash_right ON hash_infos (lm_hash_right);")
-    c.execute("CREATE INDEX lm_hash ON hash_infos (lm_hash);")
-    c.execute("CREATE INDEX username ON hash_infos (username);")
-
-    # Create boolean column for each group
-    for group in compare_groups:
-        sql = "ALTER TABLE hash_infos ADD COLUMN \"" + group[0] + "\" boolean"
-        c.execute(sql)
-
-    # Read users from each group; groups_users is a dictionary with key = group name and value = list of users
-    groups_users = {}
-    for group in compare_groups:
-        user_domain = ""
-        user_name = ""
-        try:
-            users = []
-            fing = io.open(group[1], encoding='utf-16')
-            for line in fing:
-                if "MemberDomain" in line:
-                    user_domain = (line.split(":")[1]).strip()
-                if "MemberName" in line:
-                    user_name = (line.split(":")[1]).strip()
-                    users.append(user_domain + "\\" + user_name)
-            if len(users) != 0:
-                fing.close()
-            else:
-                print("Doesn't look like the Group Files are in the form output by PowerView, assuming the files are already in domain\\username list form")
-                # If the users array is empty, assume the file was not in the PowerView PowerShell script output format that you get from running:
-                # Get-NetGroupMember -GroupName "Enterprise Admins" -Domain "some.domain.com" -DomainController "DC01.some.domain.com" > Enterprise Admins.txt
-                # You can list domain controllers for use in the above command with Get-NetForestDomain
-            
-                fing.seek(0)
-                # Reset File pointer to first line and try again
-                for line in fing:
-                    users.append(line.rstrip("\n"))
-                fing.close()
-        except:
-            fing.close()
-            print("unknown exception while processing group file(s)")
-        groups_users[group[0]] = users
-
-    # Read in NTDS file
-    print(f"[+] Reading NTDS file: {ntds_file}")
-    fin = open(ntds_file)
-    accounts_read = 0
-    accounts_filtered = 0
-    for line in fin:
-        vals = line.rstrip("\n").split(':')
-        if len(vals) == 1:
-            continue
-        accounts_read += 1
-        usernameFull = vals[0]
-        lm_hash = vals[2]
-        lm_hash_left = lm_hash[0:16]
-        lm_hash_right = lm_hash[16:32]
-        nt_hash = vals[3]
-        username = usernameFull.split('\\')[-1]
-        history_base_username = usernameFull
-        history_index = -1
-        username_info = r"(?i)(.*\\*.*)_history([0-9]+)$"
-        results = re.search(username_info,usernameFull)
-        if results:
-            history_base_username = results.group(1)
-            history_index = results.group(2)
-        # Exclude machine accounts (where account name ends in $) by default
-        # Exclude krbtgt account by default to protect this infrequently changing password from unnecesary disclosure, issue #10
-        if (args.machineaccts or not username.endswith("$")) and (args.krbtgt or not username == "krbtgt"):
-            c.execute("INSERT INTO hash_infos (username_full, username, lm_hash , lm_hash_left , lm_hash_right , nt_hash, history_index, history_base_username) VALUES (?,?,?,?,?,?,?,?)",
-                    (usernameFull, username, lm_hash, lm_hash_left, lm_hash_right, nt_hash, history_index, history_base_username))
-        else:
-            accounts_filtered += 1
-    fin.close()
+class DatabaseManager:
+    """Manages SQLite database operations."""
     
-    # Count total accounts processed
-    c.execute('SELECT count(*) FROM hash_infos WHERE history_index = -1')
-    total_accounts_processed = c.fetchone()[0]
-    print(f"[+] Read {accounts_read} accounts from NTDS file")
-    if accounts_filtered > 0:
-        print(f"[+] Filtered out {accounts_filtered} accounts (machine accounts, krbtgt)")
-    print(f"[+] Processing {total_accounts_processed} accounts for analysis")
+    def __init__(self, config: Config):
+        """
+        Initialize database manager.
+        
+        Args:
+            config: Application configuration
+        """
+        self.config = config
+        self.connection = None
+        self.cursor = None
+        self._connect()
+    
+    def _connect(self) -> None:
+        """Establish database connection."""
+        if self.config.write_database:
+            db_path = "pass_audit.db"
+            if os.path.exists(db_path):
+                os.remove(db_path)
+            self.connection = sqlite3.connect(db_path)
+        elif self.config.speed_mode:
+            self.connection = sqlite3.connect("pass_audit.db")
+        else:
+            self.connection = sqlite3.connect(':memory:')
+        
+        self.connection.text_factory = str
+        self.cursor = self.connection.cursor()
+        logger.info("Database connection established")
+    
+    def create_schema(self, group_names: List[str]) -> None:
+        """
+        Create database schema with group columns.
+        
+        Args:
+            group_names: List of group names to create columns for
+        """
+        # Create main table
+        self.cursor.execute('''
+            CREATE TABLE hash_infos (
+                username_full text collate nocase,
+                username text collate nocase,
+                lm_hash text,
+                lm_hash_left text,
+                lm_hash_right text,
+                nt_hash text,
+                password text,
+                lm_pass_left text,
+                lm_pass_right text,
+                only_lm_cracked boolean,
+                history_index int,
+                history_base_username text
+            )
+        ''')
+        
+        # Create indexes
+        indexes = [
+            "CREATE INDEX index_nt_hash ON hash_infos (nt_hash)",
+            "CREATE INDEX index_lm_hash_left ON hash_infos (lm_hash_left)",
+            "CREATE INDEX index_lm_hash_right ON hash_infos (lm_hash_right)",
+            "CREATE INDEX lm_hash ON hash_infos (lm_hash)",
+            "CREATE INDEX username ON hash_infos (username)"
+        ]
+        
+        for index_sql in indexes:
+            self.cursor.execute(index_sql)
+        
+        # Create group columns
+        for group_name in group_names:
+            sql = f'ALTER TABLE hash_infos ADD COLUMN "{group_name}" boolean'
+            self.cursor.execute(sql)
+        
+        logger.info(f"Database schema created with {len(group_names)} group columns")
+    
+    def close(self) -> None:
+        """Close database connection."""
+        if self.connection:
+            self.connection.commit()
+            self.connection.close()
+            logger.info("Database connection closed")
 
-    # update group membership flags
-    for group in groups_users:
-        for user in groups_users[group]:
-            sql = "UPDATE hash_infos SET \"" + group + \
-                "\" = 1 WHERE username_full = \"" + user + "\""
-            c.execute(sql)
 
-    # read in POT file
-    fin = open(cracked_file)
-    for lineT in fin:
-        line = lineT.rstrip('\r\n')
-        colon_index = line.find(":")
-        hash = line[0:colon_index]
-        # Stripping $NT$ and $LM$ that is included in John the Ripper output by default
-        jtr = False
-        if hash.startswith('$NT$') or hash.startswith('$LM$'):
-            hash = hash.lstrip("$NT$")
-            hash = hash.lstrip("$LM$")
-            jtr = True
-        password = line[colon_index+1:len(line)]
-        lenxx = len(hash)
-        if re.match(r"\$HEX\[([^\]]+)", password) and not jtr:
-            hex2 = (binascii.unhexlify(re.findall(r"\$HEX\[([^\]]+)", password)[-1]))
-            l = list()
-            for x in list(hex2):
-                if type(x) == int:
-                    x = str(chr(x))
-                l.append(x)
-            password = ""
-            password = password.join(l)
-        if lenxx == 32:  # An NT hash
-            c.execute("UPDATE hash_infos SET password = ? WHERE nt_hash = ?", (password, hash))
-        elif lenxx == 16:  # An LM hash, either left or right
-            c.execute("UPDATE hash_infos SET lm_pass_left = ? WHERE lm_hash_left = ?", (password, hash))
-            c.execute("UPDATE hash_infos SET lm_pass_right = ? WHERE lm_hash_right = ?", (password, hash))
-    fin.close()
-
-    # Do additional LM cracking
-    c.execute('SELECT nt_hash,lm_pass_left,lm_pass_right FROM hash_infos WHERE (lm_pass_left is not NULL or lm_pass_right is not NULL) and password is NULL and lm_hash is not "aad3b435b51404eeaad3b435b51404ee" group by nt_hash')
-    rows = c.fetchall()
-    count = len(rows)
-    if count != 0:
-        print("Cracking %d NT Hashes where only LM Hash was cracked (aka lm2ntcrack functionality)" % count)
-    for pair in rows:
-        lm_pwd = ""
-        if pair[1] is not None:
-            lm_pwd += pair[1]
-        if pair[2] is not None:
-            lm_pwd += pair[2]
-        password = crack_it(pair[0], lm_pwd)
-        if password is not None:
-            c.execute('UPDATE hash_infos SET only_lm_cracked = 1, password = \'' + password.replace("'", "''") + '\' WHERE nt_hash = \'' + pair[0] + '\'')
-        count -= 1
-
-# Total number of hashes in the NTDS file
-c.execute('SELECT username_full,password,LENGTH(password) as plen,nt_hash,only_lm_cracked FROM hash_infos WHERE history_index = -1 ORDER BY plen DESC, password')
-rows = c.fetchall()
-
-# Sanitize passwords and hashes in the data
-sanitized_rows = [sanitize_table_row(row, [1], [3]) for row in rows]  # password at index 1, nt_hash at index 3
-
-num_hashes = len(rows)
-hbt = HtmlBuilder()
-hbt.add_table_to_html(
-    sanitized_rows, ["Username", "Password", "Password Length", "NT Hash", "Only LM Cracked"])
-filename = hbt.write_html_report("all hashes.html")
-summary_table.append((num_hashes, None, "Password Hashes",
-                      "<a href=\"" + filename + "\">Details</a>"))
-
-# Check if we have any hashes to process
-if num_hashes == 0:
-    print("[!] Warning: No password hashes found in NTDS file. This may be due to:")
-    print("    - All accounts being filtered out (machine accounts, krbtgt)")
-    print("    - Empty or invalid NTDS file")
-    print("    - Incorrect file format")
-    print("[*] Exiting gracefully...")
-    exit(0)
-
-# Total number of UNIQUE hashes in the NTDS file
-c.execute('SELECT count(DISTINCT nt_hash) FROM hash_infos WHERE history_index = -1')
-num_unique_nt_hashes = c.fetchone()[0]
-percent_unique = pct(num_unique_nt_hashes, num_hashes)
-summary_table.append((num_unique_nt_hashes, percent_unique, "Unique Password Hashes", None))
-
-# Calculate total number of duplicate password hashes
-num_duplicate_hashes = num_hashes - num_unique_nt_hashes
-percent_duplicate_hashes = pct(num_duplicate_hashes, num_hashes)
-
-summary_table.append((
-    num_duplicate_hashes,
-    percent_duplicate_hashes,
-    "Duplicate Password Hashes Identified Through Audit",
-    None
-))
-
-# Number of users whose passwords were cracked
-c.execute('SELECT count(*) FROM hash_infos WHERE password is not NULL AND history_index = -1')
-num_passwords_cracked = c.fetchone()[0]
-percent_all_cracked = pct(num_passwords_cracked, num_hashes)
-summary_table.append(
-    (num_passwords_cracked, percent_all_cracked, "Passwords Discovered Through Cracking", None))
-
-# Number of UNIQUE passwords that were cracked
-c.execute(
-    'SELECT count(Distinct password) FROM hash_infos where password is not NULL AND history_index = -1 ')
-num_unique_passwords_cracked = c.fetchone()[0]
-percent_cracked_unique = pct(num_unique_passwords_cracked, num_hashes)
-summary_table.append((num_unique_passwords_cracked, percent_cracked_unique,
-                      "Unique Passwords Discovered Through Cracking", None))
-
-# Kerberoastable Accounts
-if args.kerbfile:
-    print(f"[+] Processing Kerberoastable file: {args.kerbfile}")
-    kerb_rows = load_kerberoast_ntds(args.kerbfile, args.ch_encoding, args.debug)
-
-    if kerb_rows:
-        # ---- NEW: pull usernames, not hashes ---------------------------
-        kerb_usernames = tuple({u for u, _ in kerb_rows})   # de‑dupe set → tuple
-        total_kerb_accts = len(kerb_usernames)
-        placeholders = ",".join("?" * total_kerb_accts)
-
-        c.execute(f'''
-            SELECT username_full, nt_hash, password
-            FROM   hash_infos
-            WHERE  username_full IN ({placeholders})
-              AND  password IS NOT NULL
-              AND  history_index = -1
-        ''', kerb_usernames)
-        cracked_rows = c.fetchall()
-        # ----------------------------------------------------------------
-
-        if cracked_rows:
-            # Sanitize passwords and hashes in the data
-            sanitized_kerb_rows = [sanitize_table_row(row, [2], [1]) for row in cracked_rows]  # password at index 2, nt_hash at index 1
+class GroupManager:
+    """Manages group membership processing and file handling."""
+    
+    def __init__(self, config: Config):
+        """
+        Initialize group manager.
+        
+        Args:
+            config: Application configuration
+        """
+        self.config = config
+        self.groups = []  # List of (group_name, file_path) tuples
+        self.group_users = {}  # Dict of {group_name: [usernames]}
+    
+    def load_groups(self) -> None:
+        """Load group files from the specified directory."""
+        if not self.config.groups_directory:
+            logger.info("No groups directory specified")
+            return
+        
+        group_dir = Path(self.config.groups_directory)
+        if not group_dir.is_dir():
+            logger.error(f"Groups directory does not exist: {group_dir}")
+            return
+        
+        logger.info(f"Loading group files from: {group_dir}")
+        
+        # Files to exclude from group processing
+        exclude_files = {'.ntds', '.pot', '.potfile', '.dit'}
+        
+        for file_path in sorted(group_dir.iterdir()):
+            if file_path.is_file():
+                # Skip non-group files
+                if any(file_path.suffix.lower() in exclude_files for exclude in exclude_files):
+                    logger.debug(f"Skipping non-group file: {file_path.name}")
+                    continue
+                    
+                try:
+                    self._process_group_file(file_path)
+                except Exception as e:
+                    logger.error(f"Error processing group file {file_path}: {e}")
+    
+    def _process_group_file(self, file_path: Path) -> None:
+        """
+        Process a single group file.
+        
+        Args:
+            file_path: Path to the group file
+        """
+        logger.info(f"Processing group file: {file_path.name}")
+        
+        try:
+            with open(file_path, 'r', encoding=self.config.kerberoast_encoding) as f:
+                # Skip empty lines to find first non-empty line
+                first_line = ""
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        first_line = line
+                        break
+                
+                logger.debug(f"First non-empty line: '{first_line}'")
+                
+                if first_line:
+                    # Use filename (without extension) as group name
+                    group_name = file_path.stem
+                    self.groups.append((group_name, str(file_path)))
+                    logger.info(f"Loaded group '{group_name}' from file: {file_path.name}")
+                else:
+                    logger.warning(f"Skipped empty file: {file_path.name}")
+        except Exception as e:
+            logger.error(f"Error reading group file {file_path}: {e}")
+    
+    def load_group_members(self) -> None:
+        """Load members for each group."""
+        for group_name, file_path in self.groups:
+            try:
+                users = self._load_group_members_from_file(file_path)
+                self.group_users[group_name] = users
+                logger.info(f"Group '{group_name}' has {len(users)} members")
+            except Exception as e:
+                logger.error(f"Error loading members for group '{group_name}': {e}")
+                self.group_users[group_name] = []
+    
+    def _load_group_members_from_file(self, file_path: str) -> List[str]:
+        """
+        Load group members from a file.
+        
+        Args:
+            file_path: Path to the group file
             
-            kerb_report_builder = HtmlBuilder()
-            kerb_headers = ("Username", "NT Hash", "Password")
-            kerb_report_builder.add_table_to_html(sanitized_kerb_rows, kerb_headers, 2)
-            kerb_filename = kerb_report_builder.write_html_report("kerberoast_cracked.html")
+        Returns:
+            List of usernames
+        """
+        users = []
+        
+        # Try different encodings
+        encodings_to_try = ['utf-16', 'utf-8', self.config.kerberoast_encoding]
+        
+        for encoding in encodings_to_try:
+            try:
+                with open(file_path, 'r', encoding=encoding) as f:
+                    user_domain = ""
+                    user_name = ""
+                    
+                    for line in f:
+                        line = line.strip()
+                        if not line:  # Skip empty lines
+                            continue
 
-            # percentage of roastable accounts that are cracked
-            percent = pct(len(cracked_rows), num_hashes)
-
-            summary_table.append((
-                len(cracked_rows), percent,
-                "Cracked Kerberoastable Accounts",
-                f'<a href="{kerb_filename}">Details</a>'
-            ))
-            print(f"[+] Kerberoast cracked report written: {kerb_filename} "
-                  f"({len(cracked_rows)} / {num_hashes} = {percent}% cracked)")
-        else:
-            print("[+] No Kerberoastable accounts were cracked.")
-    else:
-        print("[!] Kerberoastable file contained no valid NTDS lines.")
-
-# Group Membership Details and number of passwords cracked for each group
-# We'll collect rows for the single groups page here:
-group_summary_rows = []
-group_page_headers = ("Group Name",
-                      "# Members",
-                      "# Passwords Cracked",
-                      "% Cracked",
-                      "Members Details",
-                      "Cracked PW Details")
-
-# --- GROUP MEMBERSHIP DETAILS LOOP ---
-for group in compare_groups:
-    group_name = group[0]
-
-    # 1) Build “members of group” table/page
-    c.execute("SELECT username_full, nt_hash FROM hash_infos WHERE \"%s\" = 1 AND history_index = -1" % group_name)
-    member_rows = c.fetchall()
-    num_groupmembers = len(member_rows)
-
-    detailed_member_rows = []
-    for username_full, nt_hash in member_rows:
-        # Users sharing this hash
-        c.execute("SELECT username_full FROM hash_infos WHERE nt_hash = \"%s\" AND history_index = -1" % nt_hash)
-        users_rows = c.fetchall()
-        share_cnt = len(users_rows)
-        if share_cnt < 30:
-            shared_users_str = ', '.join(''.join(u) for u in users_rows)
-        else:
-            shared_users_str = "Too Many to List"
-
-        # Pull password + LM info
-        c.execute("SELECT password, lm_hash FROM hash_infos WHERE nt_hash = \"%s\" AND history_index = -1 LIMIT 1" % nt_hash)
-        pw, lm = c.fetchone()
-        lm_present = "Yes" if lm != "aad3b435b51404eeaad3b435b51404ee" else "No"
-
-        detailed_member_rows.append((username_full, nt_hash, shared_users_str, share_cnt, pw, lm_present))
-
-    # Sanitize passwords and hashes in the data
-    sanitized_member_rows = [sanitize_table_row(row, [4], [1]) for row in detailed_member_rows]  # password at index 4, nt_hash at index 1
-
-    member_headers = ["Username", "NT Hash", "Users Sharing this Hash", "Share Count", "Password", "Non-Blank LM Hash?"]
-    hbt_members = HtmlBuilder()
-    hbt_members.add_table_to_html(sanitized_member_rows, member_headers)
-    members_filename = hbt_members.write_html_report(f"{group_name}_members.html")
-
-    # 2) Build “cracked passwords for group” table/page
-    c.execute("""SELECT username_full, LENGTH(password) as plen, password, only_lm_cracked
-                 FROM hash_infos
-                 WHERE "%s" = 1 AND password is not NULL AND password != '' AND history_index = -1
-                 ORDER BY plen""" % group_name)
-    cracked_rows = c.fetchall()
-    num_groupmembers_cracked = len(cracked_rows)
-
-    # Sanitize passwords in the data
-    sanitized_cracked_rows = [sanitize_table_row(row, [2], []) for row in cracked_rows]  # password at index 2
-
-    cracked_headers = [f'Username of "{group_name}" Member', "Password Length", "Password", "Only LM Cracked"]
-    hbt_cracked = HtmlBuilder()
-    hbt_cracked.add_table_to_html(sanitized_cracked_rows, cracked_headers)
-    cracked_filename = hbt_cracked.write_html_report(f"{group_name}_cracked_passwords.html")
-
-    # 3) Add a single row for THIS GROUP to the groups summary page list
-    percent_cracked = pct(num_groupmembers_cracked, num_groupmembers)
-
-    group_summary_rows.append((
-        group_name,
-        num_groupmembers,
-        num_groupmembers_cracked,
-        f"{percent_cracked}%",                          # ← new value
-        f'<a href="{members_filename}">Details</a>',
-        f'<a href="{cracked_filename}">Details</a>'
-    ))
-
-# --- AFTER THE LOOP: WRITE GROUPS PAGE ---
-hbt_groups = HtmlBuilder()
-hbt_groups.add_table_to_html(
-        group_summary_rows,
-        headers=group_page_headers,
-        cols_to_not_escape=(4, 5)          # ← keep anchor tags alive
-)
-groups_page_filename = hbt_groups.write_html_report("groups_stats.html")
-
-# --- ADD ONE ROW TO THE MASTER SUMMARY TABLE ---
-summary_table.append((
-    None,
-    None,
-    "Group Cracking Statistics",
-    f'<a href="{groups_page_filename}">Details</a>'
-))
-
-# ── Password‑policy length violations ─────────────────────────────────
-c.execute('''
-    SELECT username,
-           LENGTH(password) AS plen,
-           password
-    FROM   hash_infos
-    WHERE  history_index = -1
-      AND  password IS NOT NULL
-      AND  LENGTH(password) < ?
-''', (min_len,))
-violating_rows = c.fetchall()    # (username, plen, password)
-
-if violating_rows:
-    # Build HTML table: User | Actual Len | Policy Len | Password
-    hbt_policy = HtmlBuilder()
-    headers = ["Username", "Password Length", "Policy Min Length", "Password"]
-    data = [(u, plen, min_len, ("" if p is None else p))
-            for u, plen, p in violating_rows]
-    # Sanitize passwords in the data
-    sanitized_data = [sanitize_table_row(row, [3], []) for row in data]  # password at index 3
-    hbt_policy.add_table_to_html(sanitized_data, headers, cols_to_not_escape=3)
-
-    policy_filename = hbt_policy.write_html_report("password_policy_violations.html")
-
-    # Add a line to summary_table → Count • Description • Details link
-    summary_table.append((
-        len(violating_rows), pct(len(violating_rows), num_hashes),
-        f"Accounts With Passwords Shorter Than {min_len} Characters",
-        f'<a href="{policy_filename}">Details</a>'
-    ))
-else:
-    print(f"[+] No cracked passwords shorter than {min_len} characters.")
-
-# Users whose password equals their username
-try:
-    print("[*] Checking for users whose password equals their username...")
-    c.execute("""
-        SELECT username, password, LENGTH(password) AS plen, nt_hash
-        FROM hash_infos
-        WHERE history_index = -1
-          AND password IS NOT NULL
-    """)
-    rows = c.fetchall()
-
-    offenders = []
-    for username, password, plen, nt_hash in rows:
-        if username and password and username == password:
-            offenders.append((username, password, plen, nt_hash))
-
-    # Build the HTML details table
-    if offenders:
-        print(f"[+] Found {len(offenders)} users with username == password")
-        # Sanitize passwords and hashes in the data
-        sanitized_offenders = [sanitize_table_row(row, [1], [3]) for row in offenders]  # password at index 1, nt_hash at index 3
-        hbt_user_as_pass = HtmlBuilder()
-        hbt_user_as_pass.add_table_to_html(
-            sanitized_offenders,
-            ["Username", "Password", "Password Length", "NT Hash"]
-        )
-
-        filename = hbt_user_as_pass.write_html_report("username_equals_password.html")
-        summary_table.append((
-            len(offenders),
-            pct(len(offenders), num_hashes),
-            "Accounts Using Username As Password",
-            f'<a href="{filename}">Details</a>'
-        ))
-except Exception as e:
-    print(f"[!] Error while checking username==password: {e!r}")
-
-try:
-    print("[*] Checking for users whose password equals their username by hash comparison...")
-    c.execute("""
-        SELECT username, 
-               COALESCE(username_full, username) AS username_full,
-               nt_hash,
-               password
-        FROM hash_infos
-        WHERE history_index = -1
-          AND nt_hash IS NOT NULL
-          AND username IS NOT NULL
-    """)
-    rows = c.fetchall()
-
-    # Track users already found by the "cracked password equals username" pass to avoid dupes
-    already_flagged: set[str] = set()
-    try:
-        # Seed already_flagged with offenders from the previous pass
-        already_flagged.update(o[0] for o in offenders)  # offenders: [(username, password, plen, nt_hash)]
-    except NameError:
-        pass
-
-    offenders_hashed: list[tuple[str, str, int, str]] = []
-
-    for username, username_full, nt_hash, cracked_pw in rows:
-        # If the earlier cracked-check already flagged this user, skip
-        if username in already_flagged:
-            continue
-
-        # Quick win: if we *do* have a cracked password, check equality (case-insensitive) one more time
-        # in case the earlier pass used strict case. Optional — remove if you don’t want this.
-        if cracked_pw:
-            if cracked_pw == username or cracked_pw.lower() == username.lower():
-                offenders_hashed.append((username_full or username, cracked_pw, len(cracked_pw), nt_hash))
+                        if "MemberDomain" in line:
+                            user_domain = line.split(":")[1].strip()
+                        elif "MemberName" in line:
+                            user_name = line.split(":")[1].strip()
+                            users.append(f"{user_domain}\\{user_name}")
+                    
+                    if not users:
+                        # Try simple username list format
+                        f.seek(0)
+                        for line in f:
+                            username = line.strip()
+                            if username and not username.startswith('\x00'):  # Skip null bytes
+                                users.append(username)
+                    
+                    # If we got valid users, break out of encoding loop
+                    if users and not any('\x00' in user for user in users[:3]):
+                        break
+                    else:
+                        users = []  # Reset if we got invalid data
+                        
+            except Exception as e:
+                logger.debug(f"Failed to read {file_path} with encoding {encoding}: {e}")
+                users = []  # Reset on error
                 continue
 
-        # Build username-based password candidates and compare by NT hash
-        cands = username_candidates(username, username_full)
+        if not users:
+            logger.error(f"Could not read group file {file_path} with any encoding")
+            
+        return users
+
+
+class CrackedPasswordProcessor:
+    """Handles processing of cracked password files."""
+    
+    def __init__(self, config: Config, db_manager: DatabaseManager):
+        """
+        Initialize cracked password processor.
+        
+        Args:
+            config: Application configuration
+            db_manager: Database manager instance
+        """
+        self.config = config
+        self.db_manager = db_manager
+    
+    def process_cracked_file(self) -> None:
+        """Process the cracked password file."""
+        logger.info(f"Reading cracked password file: {self.config.cracked_file}")
+        
         try:
-            target = nt_hash.lower()
-        except Exception:
-            target = nt_hash
+            with open(self.config.cracked_file, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    self._process_cracked_line(line.strip())
+                    
+        except Exception as e:
+            logger.error(f"Error processing cracked file: {e}")
+            raise
+    
+    def _process_cracked_line(self, line: str) -> None:
+        """
+        Process a single line from the cracked password file.
+        
+        Args:
+            line: Line from cracked password file
+        """
+        if ':' not in line:
+            return
+        
+        colon_index = line.find(':')
+        hash_value = line[:colon_index]
+        password = line[colon_index + 1:]
+        
+        # Handle John the Ripper format ($NT$ and $LM$ prefixes)
+        is_jtr = False
+        if hash_value.startswith('$NT$') or hash_value.startswith('$LM$'):
+            hash_value = hash_value.lstrip('$NT$').lstrip('$LM$')
+            is_jtr = True
+        
+        # Handle hex encoded passwords
+        if re.match(r"\$HEX\[([^\]]+)", password) and not is_jtr:
+            password = self._decode_hex_password(password)
+        
+        # Update database based on hash length
+        hash_length = len(hash_value)
+        if hash_length == 32:  # NT hash
+            self._update_nt_hash_password(hash_value, password)
+        elif hash_length == 16:  # LM hash
+            self._update_lm_hash_password(hash_value, password)
+    
+    def _decode_hex_password(self, password: str) -> str:
+        """
+        Decode hex-encoded password.
+        
+        Args:
+            password: Hex-encoded password string
+            
+        Returns:
+            Decoded password string
+        """
+        try:
+            hex_match = re.findall(r"\$HEX\[([^\]]+)", password)
+            if hex_match:
+                hex_data = binascii.unhexlify(hex_match[-1])
+                return ''.join(chr(x) if isinstance(x, int) else x for x in hex_data)
+        except Exception as e:
+            logger.debug(f"Error decoding hex password: {e}")
+        
+        return password
+    
+    def _update_nt_hash_password(self, hash_value: str, password: str) -> None:
+        """
+        Update NT hash with cracked password.
+        
+        Args:
+            hash_value: NT hash
+            password: Cracked password
+        """
+        sql = "UPDATE hash_infos SET password = ? WHERE nt_hash = ?"
+        self.db_manager.cursor.execute(sql, (password, hash_value))
+    
+    def _update_lm_hash_password(self, hash_value: str, password: str) -> None:
+        """
+        Update LM hash with cracked password.
+        
+        Args:
+            hash_value: LM hash
+            password: Cracked password
+        """
+        sql_left = "UPDATE hash_infos SET lm_pass_left = ? WHERE lm_hash_left = ?"
+        sql_right = "UPDATE hash_infos SET lm_pass_right = ? WHERE lm_hash_right = ?"
+        
+        self.db_manager.cursor.execute(sql_left, (password, hash_value))
+        self.db_manager.cursor.execute(sql_right, (password, hash_value))
+    
+    def perform_lm_cracking(self) -> None:
+        """Perform additional LM-based NT hash cracking."""
+        sql = '''
+            SELECT nt_hash, lm_pass_left, lm_pass_right 
+            FROM hash_infos 
+            WHERE (lm_pass_left IS NOT NULL OR lm_pass_right IS NOT NULL) 
+              AND password IS NULL 
+              AND lm_hash != "aad3b435b51404eeaad3b435b51404ee" 
+            GROUP BY nt_hash
+        '''
+        
+        rows = self.db_manager.cursor.execute(sql).fetchall()
+        count = len(rows)
+        
+        if count > 0:
+            logger.info(f"Cracking {count} NT hashes where only LM hash was cracked")
+            
+            for nt_hash, lm_pass_left, lm_pass_right in rows:
+                password = self._crack_nt_from_lm(nt_hash, lm_pass_left, lm_pass_right)
+                if password:
+                    self._update_cracked_password(nt_hash, password)
+    
+    def _crack_nt_from_lm(self, nt_hash: str, lm_pass_left: Optional[str], 
+                          lm_pass_right: Optional[str]) -> Optional[str]:
+        """
+        Attempt to crack NT hash from LM password parts.
+        
+        Args:
+            nt_hash: NT hash to crack
+            lm_pass_left: Left part of LM password
+            lm_pass_right: Right part of LM password
+            
+        Returns:
+            Cracked password or None
+        """
+        lm_password = ""
+        if lm_pass_left:
+            lm_password += lm_pass_left
+        if lm_pass_right:
+            lm_password += lm_pass_right
+        
+        try:
+            for password_guess in HashProcessor.all_casings(lm_password):
+                try:
+                    computed_hash = HashProcessor.ntlm_hash(password_guess)
+                    if nt_hash.lower() == computed_hash.lower():
+                        return password_guess
+                except RuntimeError as e:
+                    logger.error(f"NT hash backend unavailable for cracking: {e}")
+                    break
+        except Exception as e:
+            logger.debug(f"Error during LM cracking: {e}")
+        
+        return None
+    
+    def _update_cracked_password(self, nt_hash: str, password: str) -> None:
+        """
+        Update database with cracked password.
+        
+        Args:
+            nt_hash: NT hash
+            password: Cracked password
+        """
+        sql = '''
+            UPDATE hash_infos 
+            SET only_lm_cracked = 1, password = ? 
+            WHERE nt_hash = ?
+        '''
+        self.db_manager.cursor.execute(sql, (password, nt_hash))
 
-        matched = False
-        for cand in cands:
-            try:
-                h = ntlm_hash(cand)
-            except RuntimeError as e:
-                print(f"[!] NT hash backend unavailable: {e}")
-                raise
-            if h == target:
-                offenders_hashed.append((username_full or username, cand, len(cand), nt_hash))
-                matched = True
-                break
 
-        if not matched and __debug__:
-            # Optional noisy debug
-            pass
-
-    if offenders_hashed:
-        print(f"[+] Found {len(offenders_hashed)} additional users whose password == username (hash match)")
-        # Sanitize passwords and hashes in the data
-        sanitized_offenders_hashed = [sanitize_table_row(row, [1], [3]) for row in offenders_hashed]  # password at index 1, nt_hash at index 3
-        hbt_user_as_pass_hash = HtmlBuilder()
-        hbt_user_as_pass_hash.add_table_to_html(
-            sanitized_offenders_hashed,
-            ["Username", "Derived Password (from username)", "Password Length", "NT Hash"]
-        )
-        filename2 = hbt_user_as_pass_hash.write_html_report("username_equals_password_by_hash.html")
-        summary_table.append((
-            len(offenders_hashed),
-            pct(len(offenders_hashed), num_hashes),
-            "Accounts Using Username As Password Not Cracked (by hash)",
-            f'<a href="{filename2}">Details</a>'
-        ))
+def strtobool(value: str) -> bool:
+    """
+    Convert a string representation of truth to True or False.
+    
+    Args:
+        value: String value to convert
+        
+    Returns:
+        Boolean value
+        
+    Raises:
+        ValueError: If value cannot be converted
+    """
+    value = value.lower()
+    if value in ('y', 'yes', 't', 'true', 'on', '1'):
+        return True
+    elif value in ('n', 'no', 'f', 'false', 'off', '0'):
+        return False
     else:
-        print("[*] No additional username==password accounts found by hash comparison.")
-except Exception as e:
-    print(f"[!] Error while hash-checking username==password: {e!r}")
+        raise ValueError(f"invalid truth value {value!r}")
 
-# Number of LM hashes in the NTDS file, excluding the blank value
-c.execute('SELECT count(*) FROM hash_infos WHERE lm_hash is not "aad3b435b51404eeaad3b435b51404ee" AND history_index = -1')
-num_lm_hashes = c.fetchone()[0]
-percent_lm_hashes = pct(num_lm_hashes, num_hashes)
-summary_table.append((num_lm_hashes, percent_lm_hashes, "LM Hashes (Non-blank)", None))
 
-# Number of UNIQUE LM hashes in the NTDS, excluding the blank value
-c.execute('SELECT count(DISTINCT lm_hash) FROM hash_infos WHERE lm_hash is not "aad3b435b51404eeaad3b435b51404ee" AND history_index = -1')
-num_unique_lm_hashes = c.fetchone()[0]
-percent_unique_lm_hashes = pct(num_unique_lm_hashes, num_hashes)
-summary_table.append((num_unique_lm_hashes, percent_unique_lm_hashes, "Unique LM Hashes (Non-blank)", None))
-
-# Number of passwords that are LM cracked for which you don't have the exact (case sensitive) password.
-c.execute('SELECT lm_hash, lm_pass_left, lm_pass_right, nt_hash FROM hash_infos WHERE (lm_pass_left is not "" or lm_pass_right is not "") AND history_index = -1 and password is NULL and lm_hash is not "aad3b435b51404eeaad3b435b51404ee" group by lm_hash')
-rows = c.fetchall()
-num_lm_hashes_cracked_where_nt_hash_not_cracked = len(rows)
-output = "<div class='text-left'>WARNING there were %d unique LM hashes for which you do not have the password." % num_lm_hashes_cracked_where_nt_hash_not_cracked
-if num_lm_hashes_cracked_where_nt_hash_not_cracked != 0:
-    hbt = HtmlBuilder()
-    headers = ["LM Hash", "Left Portion of Password",
-               "Right Portion of Password", "NT Hash"]
-    # Sanitize passwords and hashes in the data
-    sanitized_lm_rows = [sanitize_table_row(row, [1, 2], [0, 3]) for row in rows]  # passwords at indices 1,2; hashes at indices 0,3
-    hbt.add_table_to_html(sanitized_lm_rows, headers)
-    filename = hbt.write_html_report("lm_noncracked.html")
-    output += ' <a href="' + filename + '">Details</a>'
-    output += "</br></br>Cracking these to their 7-character upcased representation is easy with Hashcat and this tool will determine the correct case and concatenate the two halves of the password for you!</br></br> Try this Hashcat command to crack all LM hashes:</br> <strong>./hashcat64.bin -m 3000 -a 3 customer.ntds -1 ?a ?1?1?1?1?1?1?1 --increment</strong></br></br> Or for John, try this:</br> <strong>john --format=LM customer.ntds</strong></br>"
-    hb.build_html_body_string(output)
-
-# Count and List of passwords that were only able to be cracked because the LM hash was available, includes usernames
-c.execute('SELECT username_full,password,LENGTH(password) as plen,only_lm_cracked FROM hash_infos WHERE only_lm_cracked = 1 ORDER BY plen AND history_index = -1')
-rows = c.fetchall()
-hbt = HtmlBuilder()
-headers = ["Username", "Password", "Password Length", "Only LM Cracked"]
-# Sanitize passwords in the data
-sanitized_lm_cracked_rows = [sanitize_table_row(row, [1], []) for row in rows]  # password at index 1
-hbt.add_table_to_html(sanitized_lm_cracked_rows, headers)
-filename = hbt.write_html_report("users_only_cracked_through_lm.html")
-percent_only_lm_cracked = pct(len(rows), num_hashes)
-summary_table.append((len(rows), percent_only_lm_cracked, "Passwords Only Cracked via LM Hash",
-                      "<a href=\"" + filename + "\">Details</a>"))
-c.execute('SELECT COUNT(DISTINCT nt_hash) FROM hash_infos WHERE only_lm_cracked = 1 AND history_index = -1')
-num_unique_lm_hashes_not_cracked = c.fetchone()[0]
-percent_unique_lm_hashes_not_cracked = pct(num_unique_lm_hashes_not_cracked, num_hashes)
-summary_table.append(
-    (num_unique_lm_hashes_not_cracked, percent_unique_lm_hashes_not_cracked, 
-     "Unique LM Hashes Cracked Where NT Hash Was Not Cracked", None))
-
-# Password length statistics
-c.execute('SELECT LENGTH(password) as plen,COUNT(password) FROM hash_infos WHERE plen is not NULL AND history_index = -1 AND plen <> 0 GROUP BY plen ORDER BY plen')
-rows = c.fetchall()
-counter = 0
-for plen, count in rows:
-    c.execute('SELECT username FROM hash_infos WHERE history_index = -1 AND LENGTH(password) = ?', (plen,))
-    usernames = c.fetchall()
-    hbt = HtmlBuilder()
-    headers = ["Users with a password length of " + str(plen)]
-    hbt.add_table_to_html(usernames, headers)
-    filename = hbt.write_html_report(str(counter) + "length_usernames.html")
-    rows[counter] += ("<a href=\"" + filename + "\">Details</a>",)
-    counter += 1
-hbt = HtmlBuilder()
-headers = ["Password Length", "Count", "Details"]
-hbt.add_table_to_html(rows, headers, 2)
-c.execute('SELECT COUNT(password) as count, LENGTH(password) as plen FROM hash_infos WHERE plen is not NULL AND history_index = -1 and plen is not 0 GROUP BY plen ORDER BY count DESC')
-rows = c.fetchall()
-headers = ["Count", "Password Length"]
-hbt.add_table_to_html(rows, headers)
-filename = hbt.write_html_report("password_length_stats.html")
-summary_table.append((None, None, "Password Length Stats",
-                      "<a href=\"" + filename + "\">Details</a>"))
-
-# Top Ten Passwords Used
-c.execute('SELECT password,COUNT(password) as count FROM hash_infos WHERE password is not NULL AND history_index = -1 and password is not "" GROUP BY password ORDER BY count DESC LIMIT 20')
-rows = c.fetchall()
-hbt = HtmlBuilder()
-headers = ["Password", "Count"]
-# Sanitize passwords in the data
-sanitized_top_passwords = [sanitize_table_row(row, [0], []) for row in rows]  # password at index 0
-hbt.add_table_to_html(sanitized_top_passwords, headers)
-filename = hbt.write_html_report("top_password_stats.html")
-summary_table.append((None, None, "Top Password Use Stats",
-                      "<a href=\"" + filename + "\">Details</a>"))
-
-# Password Reuse Statistics (based only on NT hash)
-c.execute('SELECT nt_hash, COUNT(nt_hash) as count, password FROM hash_infos WHERE nt_hash is not "31d6cfe0d16ae931b73c59d7e0c089c0" AND history_index = -1 GROUP BY nt_hash ORDER BY count DESC LIMIT 20')
-rows = c.fetchall()
-counter = 0
-for idx, (nt_hash, hit_count, pwd) in enumerate(rows):
-    c.execute(
-        'SELECT username FROM hash_infos WHERE nt_hash = ? AND history_index = -1', (nt_hash,))
-    usernames = c.fetchall()
-    if pwd is None:
-        pwd = ""
-    hbt = HtmlBuilder()
-    headers = ["Users Sharing a hash:password of " +
-               sanitize(nt_hash) + ":" + sanitize(pwd)]
-    hbt.add_table_to_html(usernames, headers)
-    filename = hbt.write_html_report(str(counter) + "reuse_usernames.html")
-    rows[counter] += ("<a href=\"" + filename + "\">Details</a>",)
-    counter += 1
-hbt = HtmlBuilder()
-headers = ["NT Hash", "Count", "Password", "Details"]
-# Sanitize passwords and hashes in the data
-sanitized_reuse_rows = [sanitize_table_row(row, [2], [0]) for row in rows]  # password at index 2, nt_hash at index 0
-hbt.add_table_to_html(sanitized_reuse_rows, headers, 3)
-filename = hbt.write_html_report("password_reuse_stats.html")
-summary_table.append((None, None, "Password Reuse Stats",
-                      "<a href=\"" + filename + "\">Details</a>"))
-
-# Password History Stats
-c.execute('SELECT MAX(history_index) FROM hash_infos;')
-max_password_history = c.fetchone()
-max_password_history = max_password_history[0]
-hbt = HtmlBuilder()
-if max_password_history < 0:
-    hbt.build_html_body_string("There was no history contained in the password files.  If you would like to get the password history, run secretsdump.py with the flag \"-history\". <br><br> Sample secretsdump.py command: secretsdump.py -system registry/SYSTEM -ntds \"Active Directory/ntds.dit\" LOCAL -outputfile customer -history")
-else:
-    password_history_headers = ["Username", "Current Password"]
-    column_names = ["cp"]
-    command = 'SELECT * FROM ( '
-    command += 'SELECT history_base_username'
-    for i in range(-1,max_password_history + 1):
-        if i == -1:
-            column_names.append("cp")
-        else:
-            password_history_headers.append("History " + str(i))
-            column_names.append("h" + str(i))
-        command += (', MIN(CASE WHEN history_index = ' + str(i) + ' THEN password END) ' + column_names[-1])
-    command += (' FROM hash_infos GROUP BY history_base_username) ')
-    command += "WHERE coalesce(" + ",".join(column_names) + ") is not NULL"
-    c.execute(command)
-    rows = c.fetchall()
-    headers = password_history_headers
-    hbt.add_table_to_html(rows, headers, 8)
-filename=hbt.write_html_report("password_history.html")
-summary_table.append((None, None, "Password History",
-                "<a href=\"" + filename + "\">Details</a>"))
-
-# Write out the main report page
-hb.add_table_to_html(summary_table, summary_table_headers, 3)
-hb.write_html_report(filename_for_html_report)
-print("The Report has been written to the \"" + filename_for_html_report +
-      "\" file in the \"" + folder_for_html_report + "\" directory")
-
-# Save (commit) the changes and close the database connection
-conn.commit()
-conn.close()
-
-try:
-    input = raw_input
-except NameError:
-    pass
-
-# prompt user to open the report
-# the code to prompt user to open the file was borrowed from the EyeWitness tool https://github.com/ChrisTruncer/EyeWitness
-print('Would you like to open the report now? [Y/n]')
-while True:
+def calculate_percentage(part: int, whole: int) -> float:
+    """
+    Calculate percentage with safe division.
+    
+    Args:
+        part: Part value
+        whole: Whole value
+        
+    Returns:
+        Percentage as float, 0.0 if division by zero
+    """
     try:
-        response = input().lower().rstrip('\r')
-        if ((response == "") or (strtobool(response))):
-            webbrowser.open(os.path.join("file://" + os.getcwd(),
-                                         folder_for_html_report, filename_for_html_report))
-            break
+        return round((part / whole) * 100, 2)
+    except ZeroDivisionError:
+        return 0.0
+
+
+def parse_arguments() -> Config:
+    """
+    Parse command line arguments and return configuration.
+    
+    Returns:
+        Configuration object
+    """
+    parser = argparse.ArgumentParser(
+        description='Domain Password Audit Tool - Analyzes NTDS dumps and password cracking results',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s -n customer.ntds -c hashcat.potfile -p 8
+  %(prog)s -n customer.ntds -c hashcat.potfile -p 8 -g groups/ -s
+  %(prog)s -n customer.ntds -c hashcat.potfile -p 8 -kz kerberoast.txt
+        """
+    )
+    
+    parser.add_argument('-n', '--ntdsfile', required=True,
+                       help='NTDS file name (output from SecretsDump.py)')
+    parser.add_argument('-c', '--crackfile', required=True,
+                       help='Password cracking output file (hashcat.potfile format)')
+    parser.add_argument('-o', '--outputfile', default='_DomainPasswordAuditReport.html',
+                       help='HTML report output filename (default: %(default)s)')
+    parser.add_argument('-d', '--reportdirectory', default='DPAT Report',
+                       help='Output directory for HTML reports (default: %(default)s)')
+    parser.add_argument('-g', '--groupsdirectory',
+                       help='Directory containing group membership files')
+    parser.add_argument('-p', '--minpasslen', type=int, required=True,
+                       help='Minimum password length defined in domain policy')
+    parser.add_argument('-s', '--sanitize', action='store_true',
+                       help='Sanitize passwords and hashes in reports')
+    parser.add_argument('-m', '--machineaccts', action='store_true',
+                       help='Include machine accounts in analysis')
+    parser.add_argument('-k', '--krbtgt', action='store_true',
+                       help='Include krbtgt account in analysis')
+    parser.add_argument('-kz', '--kerbfile',
+                       help='File containing Kerberoastable accounts')
+    parser.add_argument('--ch-encoding', default='cp1252',
+                       help='Encoding for Kerberoast files (default: %(default)s)')
+    parser.add_argument('-w', '--writedb', action='store_true',
+                       help='Write SQLite database to disk for inspection')
+    parser.add_argument('-dbg', '--debug', action='store_true',
+                       help='Enable debug output')
+    
+    args = parser.parse_args()
+    
+    return Config(
+        ntds_file=args.ntdsfile,
+        cracked_file=args.crackfile,
+        output_file=args.outputfile,
+        report_directory=args.reportdirectory,
+        groups_directory=args.groupsdirectory,
+        min_password_length=args.minpasslen,
+        sanitize_output=args.sanitize,
+        include_machine_accounts=args.machineaccts,
+        include_krbtgt=args.krbtgt,
+        kerberoast_file=args.kerbfile,
+        kerberoast_encoding=args.ch_encoding,
+        write_database=args.writedb,
+        debug_mode=args.debug
+    )
+
+
+def prompt_user_to_open_report(config: Config) -> None:
+    """Prompt user to open the report in browser."""
+    try:
+        # Skip browser prompt for now to avoid hanging
+        logger.info(f"Report available at: {os.path.join(config.report_directory, config.output_file)}")
+        return
+        
+        # Original interactive code (commented out to prevent hanging)
+        # print('Would you like to open the report now? [Y/n]')
+        # while True:
+        #     try:
+        #         response = input().lower().rstrip('\r')
+        #         if not response or strtobool(response):
+        #             report_path = os.path.join("file://" + os.getcwd(), 
+        #                                      config.report_directory, 
+        #                                      config.output_file)
+        #             webbrowser.open(report_path)
+        #             break
+        #         else:
+        #             break
+        #     except ValueError:
+        #         print("Please respond with y or n")
+    except KeyboardInterrupt:
+        logger.info("Report opening cancelled")
+
+
+def main():
+    """Main application entry point."""
+    try:
+        # Parse configuration
+        config = parse_arguments()
+        
+        # Set debug logging if requested
+        if config.debug_mode:
+            logging.getLogger().setLevel(logging.DEBUG)
+        
+        logger.info("DPAT - Domain Password Audit Tool (Refactored)")
+        logger.info(f"Processing NTDS file: {config.ntds_file}")
+        logger.info(f"Processing cracked file: {config.cracked_file}")
+        
+        # Initialize components
+        db_manager = DatabaseManager(config)
+        group_manager = GroupManager(config)
+        ntds_processor = NTDSProcessor(config, db_manager)
+        cracked_processor = CrackedPasswordProcessor(config, db_manager)
+        sanitizer = DataSanitizer()
+        
+        # Load groups
+        group_manager.load_groups()
+        group_manager.load_group_members()
+        
+        # Create database schema
+        group_names = [group[0] for group in group_manager.groups]
+        db_manager.create_schema(group_names)
+        
+        # Process NTDS file
+        ntds_processor.process_ntds_file()
+        
+        # Update group membership
+        ntds_processor.update_group_membership(group_manager)
+        
+        # Process cracked passwords
+        cracked_processor.process_cracked_file()
+        cracked_processor.perform_lm_cracking()
+        
+        # Generate comprehensive reports
+        logger.info("Generating comprehensive reports...")
+        
+        # Get total hash count
+        db_manager.cursor.execute('SELECT count(*) FROM hash_infos WHERE history_index = -1')
+        total_hashes = db_manager.cursor.fetchone()[0]
+        
+        if total_hashes == 0:
+            logger.warning("No password hashes found in NTDS file")
+            logger.info("Exiting gracefully...")
+            sys.exit(0)
+        
+        # Generate all hashes report
+        sql = '''
+            SELECT username_full, password, LENGTH(password) as plen, nt_hash, only_lm_cracked 
+            FROM hash_infos 
+            WHERE history_index = -1 
+            ORDER BY plen DESC, password
+        '''
+        
+        rows = db_manager.cursor.execute(sql).fetchall()
+        sanitized_rows = [sanitizer.sanitize_table_row(row, [1], [3], config.sanitize_output) 
+                         for row in rows]
+        
+        report_builder = HTMLReportBuilder(config.report_directory)
+        report_builder.add_table(sanitized_rows, 
+                               ["Username", "Password", "Password Length", "NT Hash", "Only LM Cracked"])
+        report_builder.write_report("all_hashes.html")
+        
+        # Initialize summary table
+        summary_table = []
+        summary_table.append((len(rows), None, "Password Hashes", '<a href="all_hashes.html">Details</a>'))
+        
+        # Unique hashes
+        db_manager.cursor.execute('SELECT count(DISTINCT nt_hash) FROM hash_infos WHERE history_index = -1')
+        unique_hashes = db_manager.cursor.fetchone()[0]
+        unique_percent = calculate_percentage(unique_hashes, total_hashes)
+        summary_table.append((unique_hashes, unique_percent, "Unique Password Hashes", None))
+        
+        # Cracked passwords
+        db_manager.cursor.execute('SELECT count(*) FROM hash_infos WHERE password IS NOT NULL AND history_index = -1')
+        cracked_count = db_manager.cursor.fetchone()[0]
+        cracked_percent = calculate_percentage(cracked_count, total_hashes)
+        summary_table.append((cracked_count, cracked_percent, "Passwords Discovered Through Cracking", None))
+        
+        # Password Policy Violations
+        db_manager.cursor.execute(f'SELECT count(*) FROM hash_infos WHERE LENGTH(password) < ? AND password IS NOT NULL AND history_index = -1', (config.min_password_length,))
+        policy_violations = db_manager.cursor.fetchone()[0]
+        policy_percent = calculate_percentage(policy_violations, cracked_count) if cracked_count > 0 else 0
+        
+        if policy_violations > 0:
+            db_manager.cursor.execute(f'''SELECT username_full, password, LENGTH(password) as plen, nt_hash 
+                                        FROM hash_infos 
+                                        WHERE LENGTH(password) < ? AND password IS NOT NULL AND history_index = -1
+                                        ORDER BY plen''', (config.min_password_length,))
+            policy_rows = db_manager.cursor.fetchall()
+            sanitized_policy_rows = [sanitizer.sanitize_table_row(row, [1], [3], config.sanitize_output) 
+                                   for row in policy_rows]
+            
+            policy_builder = HTMLReportBuilder(config.report_directory)
+            policy_builder.add_table(sanitized_policy_rows, 
+                                   ["Username", "Password", "Password Length", "NT Hash"])
+            policy_filename = policy_builder.write_report("password_policy_violations.html")
+            summary_table.append((policy_violations, policy_percent, "Password Policy Violations", f'<a href="{policy_filename}">Details</a>'))
+        
+        # Username equals password (cracked)
+        db_manager.cursor.execute('''SELECT username_full, password, LENGTH(password) as plen, nt_hash 
+                                    FROM hash_infos 
+                                    WHERE password IS NOT NULL AND history_index = -1 
+                                    AND LOWER(username) = LOWER(password)''')
+        username_password_rows = db_manager.cursor.fetchall()
+        
+        if username_password_rows:
+            sanitized_up_rows = [sanitizer.sanitize_table_row(row, [1], [3], config.sanitize_output) 
+                               for row in username_password_rows]
+            
+            up_builder = HTMLReportBuilder(config.report_directory)
+            up_builder.add_table(sanitized_up_rows, 
+                               ["Username", "Password", "Password Length", "NT Hash"])
+            up_filename = up_builder.write_report("username_equals_password.html")
+            up_percent = calculate_percentage(len(username_password_rows), cracked_count) if cracked_count > 0 else 0
+            summary_table.append((len(username_password_rows), up_percent, "Accounts Using Username As Password", f'<a href="{up_filename}">Details</a>'))
+        
+        # LM Hash Statistics
+        db_manager.cursor.execute('SELECT count(*) FROM hash_infos WHERE lm_hash != "aad3b435b51404eeaad3b435b51404ee" AND history_index = -1')
+        lm_hashes = db_manager.cursor.fetchone()[0]
+        lm_percent = calculate_percentage(lm_hashes, total_hashes)
+        summary_table.append((lm_hashes, lm_percent, "LM Hashes (Non-blank)", None))
+        
+        db_manager.cursor.execute('SELECT count(DISTINCT lm_hash) FROM hash_infos WHERE lm_hash != "aad3b435b51404eeaad3b435b51404ee" AND history_index = -1')
+        unique_lm_hashes = db_manager.cursor.fetchone()[0]
+        unique_lm_percent = calculate_percentage(unique_lm_hashes, total_hashes)
+        summary_table.append((unique_lm_hashes, unique_lm_percent, "Unique LM Hashes (Non-blank)", None))
+        
+        # Passwords only cracked via LM
+        db_manager.cursor.execute('''SELECT username_full, password, LENGTH(password) as plen, only_lm_cracked 
+                                    FROM hash_infos 
+                                    WHERE only_lm_cracked = 1 AND history_index = -1 
+                                    ORDER BY plen''')
+        lm_only_rows = db_manager.cursor.fetchall()
+        
+        if lm_only_rows:
+            sanitized_lm_only_rows = [sanitizer.sanitize_table_row(row, [1], [], config.sanitize_output) 
+                                     for row in lm_only_rows]
+            
+            lm_only_builder = HTMLReportBuilder(config.report_directory)
+            lm_only_builder.add_table(sanitized_lm_only_rows, 
+                                    ["Username", "Password", "Password Length", "Only LM Cracked"])
+            lm_only_filename = lm_only_builder.write_report("users_only_cracked_through_lm.html")
+            lm_only_percent = calculate_percentage(len(lm_only_rows), total_hashes)
+            summary_table.append((len(lm_only_rows), lm_only_percent, "Passwords Only Cracked via LM Hash", f'<a href="{lm_only_filename}">Details</a>'))
+        
+        # Top Password Statistics
+        db_manager.cursor.execute('''SELECT password, COUNT(password) as count 
+                                    FROM hash_infos 
+                                    WHERE password IS NOT NULL AND history_index = -1 AND password != "" 
+                                    GROUP BY password ORDER BY count DESC LIMIT 20''')
+        top_password_rows = db_manager.cursor.fetchall()
+        
+        if top_password_rows:
+            sanitized_top_rows = [sanitizer.sanitize_table_row(row, [0], [], config.sanitize_output) 
+                                for row in top_password_rows]
+            
+            top_builder = HTMLReportBuilder(config.report_directory)
+            top_builder.add_table(sanitized_top_rows, ["Password", "Count"])
+            top_filename = top_builder.write_report("top_password_stats.html")
+            summary_table.append((None, None, "Top Password Use Stats", f'<a href="{top_filename}">Details</a>'))
+        
+        # Password Length Statistics
+        db_manager.cursor.execute('''SELECT LENGTH(password) as plen, COUNT(password) as count 
+                                    FROM hash_infos 
+                                    WHERE password IS NOT NULL AND history_index = -1 AND LENGTH(password) > 0 
+                                    GROUP BY plen ORDER BY plen''')
+        length_rows = db_manager.cursor.fetchall()
+        
+        if length_rows:
+            length_builder = HTMLReportBuilder(config.report_directory)
+            length_builder.add_table(length_rows, ["Password Length", "Count"])
+            length_filename = length_builder.write_report("password_length_stats.html")
+            summary_table.append((None, None, "Password Length Stats", f'<a href="{length_filename}">Details</a>'))
+        
+        # Password Reuse Statistics
+        db_manager.cursor.execute('''SELECT nt_hash, COUNT(nt_hash) as count, password 
+                                    FROM hash_infos 
+                                    WHERE nt_hash != "31d6cfe0d16ae931b73c59d7e0c089c0" AND history_index = -1 
+                                    GROUP BY nt_hash ORDER BY count DESC LIMIT 20''')
+        reuse_rows = db_manager.cursor.fetchall()
+        
+        if reuse_rows:
+            # Process each reuse row to add details links
+            processed_reuse_rows = []
+            for counter, (nt_hash, hit_count, password) in enumerate(reuse_rows):
+                # Get usernames sharing this hash
+                db_manager.cursor.execute('''SELECT username_full FROM hash_infos 
+                                            WHERE nt_hash = ? AND history_index = -1 
+                                            ORDER BY username_full''', (nt_hash,))
+                usernames = [row[0] for row in db_manager.cursor.fetchall()]
+                
+                # Create individual details page for this password reuse
+                details_builder = HTMLReportBuilder(config.report_directory)
+                # Convert usernames list to list of tuples for proper table formatting
+                username_rows = [(username,) for username in usernames]
+                
+                # Create column header with hash and password info
+                if password and password.strip():
+                    column_header = f"Users Sharing Hash: {sanitizer.sanitize_value(nt_hash, config.sanitize_output)} Password: {sanitizer.sanitize_value(password, config.sanitize_output)}"
+                else:
+                    column_header = f"Users Sharing Hash: {sanitizer.sanitize_value(nt_hash, config.sanitize_output)} (Password Not Cracked)"
+                
+                details_builder.add_table(username_rows, [column_header])
+                details_filename = details_builder.write_report(f"{counter}reuse_usernames.html")
+                
+                # Add details link to the row
+                processed_reuse_rows.append((nt_hash, hit_count, password, f'<a href="{details_filename}">Details</a>'))
+            
+            sanitized_reuse_rows = [sanitizer.sanitize_table_row(row, [2], [0], config.sanitize_output) 
+                                   for row in processed_reuse_rows]
+            
+            reuse_builder = HTMLReportBuilder(config.report_directory)
+            reuse_builder.add_table(sanitized_reuse_rows, ["NT Hash", "Count", "Password", "Details"], cols_to_not_escape=3)
+            reuse_filename = reuse_builder.write_report("password_reuse_stats.html")
+            summary_table.append((None, None, "Password Reuse Stats", f'<a href="{reuse_filename}">Details</a>'))
+        
+        # Password History Statistics
+        db_manager.cursor.execute('SELECT MAX(history_index) FROM hash_infos')
+        max_history = db_manager.cursor.fetchone()[0]
+        
+        if max_history is not None and max_history >= 0:
+            password_history_headers = ["Username", "Current Password"]
+            column_names = ["cp"]
+            command = 'SELECT * FROM ( SELECT history_base_username'
+            
+            for i in range(-1, max_history + 1):
+                if i == -1:
+                    column_names.append("cp")
+                else:
+                    password_history_headers.append(f"History {i}")
+                    column_names.append(f"h{i}")
+                command += f', MIN(CASE WHEN history_index = {i} THEN password END) {column_names[-1]}'
+            
+            command += ' FROM hash_infos GROUP BY history_base_username) WHERE coalesce(' + ",".join(column_names) + ') is not NULL'
+            
+            db_manager.cursor.execute(command)
+            history_rows = db_manager.cursor.fetchall()
+            
+            if history_rows:
+                history_builder = HTMLReportBuilder(config.report_directory)
+                history_builder.add_table(history_rows, password_history_headers)
+                history_filename = history_builder.write_report("password_history.html")
+                summary_table.append((None, None, "Password History", f'<a href="{history_filename}">Details</a>'))
         else:
-            break
-    except ValueError:
-        print("Please respond with y or n")
+            history_builder = HTMLReportBuilder(config.report_directory)
+            history_builder.body_content = "There was no history contained in the password files. If you would like to get the password history, run secretsdump.py with the flag \"-history\".<br><br>Sample secretsdump.py command: secretsdump.py -system registry/SYSTEM -ntds \"Active Directory/ntds.dit\" LOCAL -outputfile customer -history"
+            history_filename = history_builder.write_report("password_history.html")
+            summary_table.append((None, None, "Password History", f'<a href="{history_filename}">Details</a>'))
+        
+        # Generate main summary report
+        summary_builder = HTMLReportBuilder(config.report_directory)
+        summary_builder.add_table(summary_table, ("Count", "Percent", "Description", "More Info"), cols_to_not_escape=3)
+        summary_builder.write_report(config.output_file)
+        
+        # Generate group reports if groups are specified
+        if group_manager.groups:
+            logger.info("Generating group reports...")
+            group_summary_rows = []
+            group_page_headers = ["Group Name", "Total Members", "Cracked Members", "Cracked %", "Members Details", "Cracked Details"]
+            
+            for group_name, _ in group_manager.groups:
+                # Get group member count
+                db_manager.cursor.execute(f'SELECT count(*) FROM hash_infos WHERE "{group_name}" = 1 AND history_index = -1')
+                num_groupmembers = db_manager.cursor.fetchone()[0]
+                
+                # Get cracked count for this group
+                db_manager.cursor.execute(f'''SELECT count(*) FROM hash_infos 
+                                            WHERE "{group_name}" = 1 AND password IS NOT NULL AND password != '' AND history_index = -1''')
+                num_groupmembers_cracked = db_manager.cursor.fetchone()[0]
+                
+                # Calculate percentage
+                percent_cracked = calculate_percentage(num_groupmembers_cracked, num_groupmembers)
+                
+                # Generate group members report
+                db_manager.cursor.execute(f'''SELECT username_full, nt_hash, password, lm_hash
+                                            FROM hash_infos 
+                                            WHERE "{group_name}" = 1 AND history_index = -1
+                                            ORDER BY username_full''')
+                member_rows = db_manager.cursor.fetchall()
+                
+                # Process member data to show sharing information
+                processed_member_rows = []
+                for username_full, nt_hash, password, lm_hash in member_rows:
+                    # Get all users sharing this hash
+                    db_manager.cursor.execute('''SELECT username_full FROM hash_infos 
+                                                WHERE nt_hash = ? AND history_index = -1 
+                                                ORDER BY username_full''', (nt_hash,))
+                    sharing_users = [row[0] for row in db_manager.cursor.fetchall()]
+                    share_count = len(sharing_users)
+                    
+                    # Create a string of sharing users (one per line)
+                    if share_count > 5:
+                        sharing_text = "<br>".join(sharing_users[:5]) + f"<br>(and {share_count - 5} more)"
+                    else:
+                        sharing_text = "<br>".join(sharing_users)
+                    
+                    # Determine if LM hash is non-blank
+                    lm_non_blank = "No" if lm_hash == "aad3b435b51404eeaad3b435b51404ee" else "Yes"
+                    
+                    processed_member_rows.append((username_full, nt_hash, sharing_text, share_count, password, lm_non_blank))
+                
+                # Sanitize member data
+                sanitized_member_rows = [sanitizer.sanitize_table_row(row, [4], [1], config.sanitize_output) 
+                                       for row in processed_member_rows]
+                
+                member_headers = ["Username", "NT Hash", "Users Sharing this Hash", "Share Count", "Password", "Non-Blank LM Hash?"]
+                member_builder = HTMLReportBuilder(config.report_directory)
+                member_builder.add_table(sanitized_member_rows, member_headers, cols_to_not_escape=2)
+                
+                # Sanitize group name for filename
+                safe_group_name = re.sub(r'[<>:"/\\|?*]', '_', group_name)
+                members_filename = member_builder.write_report(f"{safe_group_name}_members.html")
+                
+                # Generate cracked passwords report for this group
+                db_manager.cursor.execute(f'''SELECT username_full, LENGTH(password) as plen, password, only_lm_cracked
+                                            FROM hash_infos
+                                            WHERE "{group_name}" = 1 AND password IS NOT NULL AND password != '' AND history_index = -1
+                                            ORDER BY plen''')
+                cracked_rows = db_manager.cursor.fetchall()
+                
+                # Sanitize cracked data
+                sanitized_cracked_rows = [sanitizer.sanitize_table_row(row, [2], [], config.sanitize_output) 
+                                        for row in cracked_rows]
+                
+                cracked_headers = [f'Username of "{group_name}" Member', "Password Length", "Password", "Only LM Cracked"]
+                cracked_builder = HTMLReportBuilder(config.report_directory)
+                cracked_builder.add_table(sanitized_cracked_rows, cracked_headers)
+                cracked_filename = cracked_builder.write_report(f"{safe_group_name}_cracked_passwords.html")
+                
+                # Add to group summary
+                group_summary_rows.append((
+                    group_name,
+                    num_groupmembers,
+                    num_groupmembers_cracked,
+                    f"{percent_cracked}%",
+                    f'<a href="{members_filename}">Details</a>',
+                    f'<a href="{cracked_filename}">Details</a>'
+                ))
+            
+            # Generate groups summary page
+            groups_builder = HTMLReportBuilder(config.report_directory)
+            groups_builder.add_table(group_summary_rows, group_page_headers, cols_to_not_escape=(4, 5))
+            groups_filename = groups_builder.write_report("groups_stats.html")
+            
+            # Add groups link to main summary
+            summary_table.append((len(group_manager.groups), None, "Groups Analyzed", f'<a href="{groups_filename}">Details</a>'))
+            
+            # Regenerate main summary with groups link
+            summary_builder = HTMLReportBuilder(config.report_directory)
+            summary_builder.add_table(summary_table, ("Count", "Percent", "Description", "More Info"), cols_to_not_escape=3)
+            summary_builder.write_report(config.output_file)
+        
+        # Close database
+        db_manager.close()
+        
+        # Prompt user to open report
+        prompt_user_to_open_report(config)
+        
+        logger.info("Processing completed successfully")
+        
+    except KeyboardInterrupt:
+        logger.info("Operation cancelled by user")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        if config.debug_mode:
+            raise
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

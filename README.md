@@ -2,6 +2,22 @@
 
 This is a python script that will generate password use statistics from password hashes dumped from a domain controller and a password crack file such as hashcat.potfile generated from the Hashcat tool during password cracking. The report is an HTML report with clickable links.
 
+## Requirements
+
+- Python 3.8 or higher
+- pycryptodome (for MD4 hash support): `pip install pycryptodome`
+
+## Installation
+
+```sh
+pip install pycryptodome
+```
+
+Or using Poetry:
+```sh
+poetry install
+```
+
 
 ![alt text](img/dpat%20summary.png "DPAT Summary Table")
 ![alt text](img/group%20statistics.png "DPAT Group Table")

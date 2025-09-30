@@ -63,3 +63,6 @@ Sanitized - DPAT Report/
 
 # Poetry - DO NOT ignore lock file
 # poetry.lock is intentionally not ignored
+DPAT Report - Sanitized/report.css
+groups_test/Domain Admins.txt
+groups_test/Enterprise Admins.txt
