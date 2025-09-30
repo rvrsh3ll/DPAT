@@ -543,8 +543,10 @@ class HTMLReportBuilder:
         options_json = json.dumps(options)
         
         chart_html = f"""
-<div class='chart-container' style='position: relative; height: 400px; width: 100%; margin: 20px 0;'>
-    <canvas id='{chart_id}'></canvas>
+<div class='table-wrap' style='text-align: center;'>
+    <div class='chart-container' style='position: relative; height: 400px; width: 100%; margin: 20px auto; display: inline-block;'>
+        <canvas id='{chart_id}'></canvas>
+    </div>
 </div>
 <script>
     const ctx_{chart_id} = document.getElementById('{chart_id}').getContext('2d');
@@ -1587,7 +1589,10 @@ def main():
         # Generate main summary report
         summary_builder = HTMLReportBuilder(config.report_directory)
         
-        # Add charts before the summary table
+        # Add the summary table first
+        summary_builder.add_table(summary_table, ("Count", "Percent", "Description", "More Info"), cols_to_not_escape=3)
+        
+        # Add charts after the summary table
         # Password Length Distribution Chart
         db_manager.cursor.execute('''SELECT LENGTH(password) as plen, COUNT(password) as count 
                                     FROM hash_infos 
@@ -1700,8 +1705,6 @@ def main():
             
             summary_builder.add_chart("topPasswordsChart", "bar", top_passwords_chart_data, top_passwords_chart_options)
         
-        # Add the summary table
-        summary_builder.add_table(summary_table, ("Count", "Percent", "Description", "More Info"), cols_to_not_escape=3)
         summary_builder.write_report(config.output_file)
         
         # Generate group reports if groups are specified
