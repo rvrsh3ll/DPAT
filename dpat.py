@@ -1242,6 +1242,10 @@ def main():
             up_filename = up_builder.write_report("username_equals_password.html")
             up_percent = calculate_percentage(len(username_password_rows), cracked_count) if cracked_count > 0 else 0
             summary_table.append((len(username_password_rows), up_percent, "Accounts Using Username As Password", f'<a href="{up_filename}">Details</a>'))
+        else:
+            # Always show the row, even if there are no accounts
+            up_percent = 0
+            summary_table.append((0, up_percent, "Accounts Using Username As Password", None))
         
         # LM Hash Statistics
         db_manager.cursor.execute('SELECT count(*) FROM hash_infos WHERE lm_hash != "aad3b435b51404eeaad3b435b51404ee" AND history_index = -1')
