@@ -35,8 +35,8 @@ html.dark-theme {
   --accent-light: #1e3a8a;
   --border: #374151;
   --border-strong: #6b7280;
-  --row-alt: #1f2937;
-  --row-hover: #374151;
+  --row-alt: #374151;
+  --row-hover: #4b5563;
   --shadow-1: 0 7px 8px -4px rgba(0,0,0,.6),0 12px 17px 2px rgba(0,0,0,.4),0 5px 22px 4px rgba(0,0,0,.3);
 }
 
@@ -144,17 +144,21 @@ html.dark-theme .table-wrap .table {
 
 html.dark-theme .table-wrap .table tbody tr:nth-of-type(odd) {
   background-color: var(--row-alt) !important;
-  color: var(--fg) !important;
+  color: #f3f4f6 !important;
 }
 
 html.dark-theme .table-wrap .table tbody tr:nth-of-type(even) {
   background-color: var(--bg) !important;
-  color: var(--fg) !important;
+  color: #f3f4f6 !important;
 }
 
 html.dark-theme .table-wrap .table tbody tr:hover {
   background-color: var(--row-hover) !important;
-  color: var(--fg) !important;
+  color: #f3f4f6 !important;
+}
+
+html.dark-theme .table-wrap .table tbody tr td {
+  color: #f3f4f6 !important;
 }
 
 html.light-theme .table-wrap .table {
