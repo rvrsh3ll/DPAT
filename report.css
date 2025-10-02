@@ -142,12 +142,42 @@ html.dark-theme .table-wrap .table {
   --bs-table-color: var(--fg);
 }
 
+html.dark-theme .table-wrap .table tbody tr:nth-of-type(odd) {
+  background-color: var(--row-alt) !important;
+  color: var(--fg) !important;
+}
+
+html.dark-theme .table-wrap .table tbody tr:nth-of-type(even) {
+  background-color: var(--bg) !important;
+  color: var(--fg) !important;
+}
+
+html.dark-theme .table-wrap .table tbody tr:hover {
+  background-color: var(--row-hover) !important;
+  color: var(--fg) !important;
+}
+
 html.light-theme .table-wrap .table {
   --bs-table-bg: transparent;
   --bs-table-striped-bg: var(--row-alt);
   --bs-table-hover-bg: var(--row-hover);
   --bs-table-border-color: var(--border);
   --bs-table-color: var(--fg);
+}
+
+html.light-theme .table-wrap .table tbody tr:nth-of-type(odd) {
+  background-color: var(--row-alt) !important;
+  color: var(--fg) !important;
+}
+
+html.light-theme .table-wrap .table tbody tr:nth-of-type(even) {
+  background-color: var(--bg) !important;
+  color: var(--fg) !important;
+}
+
+html.light-theme .table-wrap .table tbody tr:hover {
+  background-color: var(--row-hover) !important;
+  color: var(--fg) !important;
 }
 
 .text-left { text-align:left; max-width:1400px; margin:0 auto 24px; }
@@ -202,6 +232,37 @@ html.light-theme .table-wrap .table {
 
 .dataTables_length {
   margin-bottom: 1rem;
+}
+
+/* DataTables dark mode styling */
+html.dark-theme .dataTables_wrapper .dataTables_length,
+html.dark-theme .dataTables_wrapper .dataTables_filter,
+html.dark-theme .dataTables_wrapper .dataTables_info,
+html.dark-theme .dataTables_wrapper .dataTables_paginate {
+  color: var(--fg) !important;
+}
+
+html.dark-theme .dataTables_wrapper .dataTables_length select,
+html.dark-theme .dataTables_wrapper .dataTables_filter input {
+  background-color: var(--bg) !important;
+  color: var(--fg) !important;
+  border-color: var(--border) !important;
+}
+
+html.dark-theme .dataTables_wrapper .dataTables_paginate .paginate_button {
+  background-color: var(--bg) !important;
+  color: var(--fg) !important;
+  border-color: var(--border) !important;
+}
+
+html.dark-theme .dataTables_wrapper .dataTables_paginate .paginate_button:hover {
+  background-color: var(--row-hover) !important;
+  color: var(--fg) !important;
+}
+
+html.dark-theme .dataTables_wrapper .dataTables_paginate .paginate_button.current {
+  background-color: var(--accent) !important;
+  color: white !important;
 }
 
 /* Chart container improvements */
