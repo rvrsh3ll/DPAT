@@ -470,6 +470,7 @@ class HTMLReportBuilder:
         """
         self.report_directory = report_directory
         self.body_content = ""
+        self.charts_data = []  # Store chart data for later initialization
     
     def add_content(self, content: str) -> None:
         """
@@ -551,16 +552,16 @@ class HTMLReportBuilder:
         <canvas id='{chart_id}'></canvas>
     </div>
 </div>
-<script>
-    const ctx_{chart_id} = document.getElementById('{chart_id}').getContext('2d');
-    new Chart(ctx_{chart_id}, {{
-        type: '{chart_type}',
-        data: {data_json},
-        options: {options_json}
-    }});
-</script>
 """
         self.add_content(chart_html)
+        
+        # Store chart data for later initialization
+        self.charts_data.append({
+            'id': chart_id,
+            'type': chart_type,
+            'data': data_json,
+            'options': options_json
+        })
     
     def generate_html(self) -> str:
         """
@@ -569,6 +570,7 @@ class HTMLReportBuilder:
         Returns:
             Complete HTML document string
         """
+        import json
         return (
             "<!DOCTYPE html>\n<html lang='en'>\n<head>\n"
             "<meta charset='utf-8'>\n<meta name='viewport' content='width=device-width,initial-scale=1'>\n"
@@ -715,6 +717,27 @@ class HTMLReportBuilder:
             "  \n"
             "  // Initialize DataTables for all tables\n"
             "  initializeDataTables();\n"
+            "  \n"
+            "  // Initialize charts after Chart.js loads\n"
+            "  function initializeCharts() {\n"
+            "    if (typeof Chart !== 'undefined') {\n"
+            "      const chartsData = " + json.dumps(self.charts_data) + ";\n"
+            "      chartsData.forEach(function(chartConfig) {\n"
+            "        const ctx = document.getElementById(chartConfig.id).getContext('2d');\n"
+            "        new Chart(ctx, {\n"
+            "          type: chartConfig.type,\n"
+            "          data: JSON.parse(chartConfig.data),\n"
+            "          options: JSON.parse(chartConfig.options)\n"
+            "        });\n"
+            "      });\n"
+            "    } else {\n"
+            "      // Chart.js not loaded yet, try again in 100ms\n"
+            "      setTimeout(initializeCharts, 100);\n"
+            "    }\n"
+            "  }\n"
+            "  \n"
+            "  // Start chart initialization\n"
+            "  initializeCharts();\n"
             "});\n"
             "</script>\n"
             "</body>\n</html>\n"
