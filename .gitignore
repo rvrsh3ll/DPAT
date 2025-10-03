@@ -57,6 +57,7 @@ pass_audit.db
 DPAT Report/
 Sanitized - DPAT Report/
 *.html
+**/DPAT icon.png
 
 # Claude
 .claude/*
