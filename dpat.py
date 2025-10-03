@@ -606,7 +606,7 @@ class HTMLReportBuilder:
             "<!-- Bootstrap 5 Navbar -->\n"
             "<nav class='navbar navbar-expand-lg navbar-dark bg-primary fixed-top'>\n"
             "  <div class='container-fluid'>\n"
-            "    <a class='navbar-brand fw-bold' href='#'>DPAT Report</a>\n"
+            "    <a class='navbar-brand fw-bold' href='_DomainPasswordAuditReport.html'><img src='DPAT icon.png' alt='DPAT' width='30' height='30' style='margin-right: 8px; vertical-align: middle;'>DPAT Report</a>\n"
             "    <button class='navbar-toggler' type='button' data-bs-toggle='collapse' data-bs-target='#navbarNav'>\n"
             "      <span class='navbar-toggler-icon'></span>\n"
             "    </button>\n"
@@ -780,6 +780,12 @@ class HTMLReportBuilder:
         css_dest = Path(self.report_directory) / "report.css"
         if css_source.exists():
             copyfile(css_source, css_dest)
+        
+        # Copy DPAT icon file
+        icon_source = Path(__file__).parent / "img" / "DPAT icon.png"
+        icon_dest = Path(self.report_directory) / "DPAT icon.png"
+        if icon_source.exists():
+            copyfile(icon_source, icon_dest)
         
         # Write HTML file
         with open(file_path, 'w', encoding='utf-8') as f:
