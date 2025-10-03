@@ -55,6 +55,7 @@ Thumbs.db
 # Project specific
 pass_audit.db
 DPAT Report/
+DPAT Report - Sanitized/
 Sanitized - DPAT Report/
 *.html
 **/DPAT icon.png
