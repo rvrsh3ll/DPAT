@@ -1,4 +1,4 @@
-# Domain Password Audit Tool (DPAT)
+# <img src="img/DPAT%20icon.png" alt="DPAT Icon" width="37" height="37"> Domain Password Audit Tool (DPAT)
 
 DPAT is a Python-based security tool that analyzes password hashes extracted from Active Directory domain controllers. It generates comprehensive HTML reports showing password usage statistics, policy violations, and security insights from both NTDS dumps and password cracking results.
 
@@ -7,6 +7,8 @@ DPAT is a Python-based security tool that analyzes password hashes extracted fro
 ![DPAT Summary](img/dpat%20summary.png)
 
 ![Group Statistics](img/group%20statistics.png)
+
+![Charts](img/charts.png)
 
 ## Features
 
