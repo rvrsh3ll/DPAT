@@ -1746,8 +1746,14 @@ def main():
             history_rows = db_manager.cursor.fetchall()
             
             if history_rows:
+                # Sanitize password columns (all columns except index 0 which is username)
+                # All columns from index 1 onwards are passwords
+                password_column_indices = list(range(1, len(password_history_headers)))
+                sanitized_history_rows = [sanitizer.sanitize_table_row(row, password_column_indices, [], config.sanitize_output) 
+                                        for row in history_rows]
+                
                 history_builder = HTMLReportBuilder(config.report_directory)
-                history_builder.add_table(history_rows, password_history_headers)
+                history_builder.add_table(sanitized_history_rows, password_history_headers)
                 history_filename = history_builder.write_report("password_history.html")
                 summary_table.append((None, None, "Password History", f'<a href="{history_filename}">Details</a>'))
         else:
