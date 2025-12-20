@@ -253,7 +253,7 @@ class TestHTMLReportBuilder(DPATTestCase):
         html = builder.generate_html()
         
         self.assertIn("<!DOCTYPE html>", html)
-        self.assertIn("<html>", html)
+        self.assertIn("<html", html)  # Matches <html lang='en'> and other variations
         self.assertIn("<head>", html)
         self.assertIn("<body>", html)
         self.assertIn("<h1>Test Report</h1>", html)

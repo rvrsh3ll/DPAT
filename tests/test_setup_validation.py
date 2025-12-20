@@ -33,7 +33,7 @@ class TestSetupValidation:
         
         # Verify it's a valid Python file by checking it has content
         content = dpat_file.read_text()
-        assert "#!/usr/bin/python" in content
+        assert "#!/usr/bin/env python" in content
         assert "argparse" in content
     
     def test_conftest_fixtures_available(self, temp_dir, mock_config):
