@@ -28,7 +28,21 @@ DPAT is a Python-based security tool that analyzes password hashes extracted fro
 
 ## Installation
 
-### Using pip
+### Basic Installation
+
+**Install core dependencies:**
+```bash
+pip install -r requirements.txt
+```
+
+**For development and testing:**
+```bash
+pip install -r requirements-dev.txt
+```
+
+### Manual Installation
+
+If you prefer to install dependencies individually:
 ```bash
 pip install pycryptodome
 ```

@@ -1,0 +1,10 @@
+# Domain Password Audit Tool (DPAT) Requirements
+# Python 3.8 or higher required
+
+# Core dependencies
+pycryptodome>=3.23.0
+
+# Optional dependencies for enhanced functionality
+# Uncomment any of the following if you need additional capabilities:
+# passlib>=1.7.4  # For additional password hashing support
+# impacket>=0.11.0  # For additional NT hash cracking support
