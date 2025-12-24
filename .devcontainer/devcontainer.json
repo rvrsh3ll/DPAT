@@ -2,5 +2,6 @@
 	"image": "mcr.microsoft.com/devcontainers/universal:2",
 	"features": {
 		"ghcr.io/devcontainers-extra/features/live-server:1": {}
-	}
+	},
+	"postCreateCommand": "pip install -r requirements-dev.txt"
 }
